@@ -1,82 +1,3 @@
----
-name: Fashion Recommender Execution Plan
-overview: "A three-phase execution plan to build a real-time personalized fashion recommender system with integrated hybrid semantic search on the H&M dataset, following the Tolloso et al. (2025) Knowledge Distillation architecture: HGNN teacher, Student MLP, per-user Personal MLP with EMA and Triplet Loss adaptation, Weaviate for hybrid vector+metadata search, Upstash Redis + LRU cache for Personal MLP lifecycle and session state, deployed on Modal with a Streamlit frontend."
-todos:
-  - id: 1.1-scaffolding
-    content: "Phase 1.1: Project scaffolding, directory structure, requirements.txt, configs"
-    status: pending
-  - id: 1.2-data
-    content: "Phase 1.2: H&M data download, exploration notebook, POC subset selection"
-    status: pending
-  - id: 1.3-clip
-    content: "Phase 1.3: FashionCLIP dual-encoder embedding extraction (image embeddings + text encoder setup)"
-    status: pending
-  - id: 1.3b-weaviate
-    content: "Phase 1.3b: Weaviate schema design and product catalog ingestion (512-dim vectors + metadata)"
-    status: pending
-  - id: 1.4-graph
-    content: "Phase 1.4: Heterogeneous graph construction from co-purchase data"
-    status: pending
-  - id: 1.5-hgnn
-    content: "Phase 1.5: HGNN teacher model (SAGEConv + contrastive loss) training"
-    status: pending
-  - id: 1.6-student
-    content: "Phase 1.6: Student MLP knowledge distillation (alignment loss)"
-    status: pending
-  - id: 1.6b-weaviate-rec
-    content: "Phase 1.6b: Ingest 64-dim Student MLP embeddings into Weaviate recommendation collection"
-    status: pending
-  - id: 1.7-engine
-    content: "Phase 1.7: Hybrid search engine (text/image + metadata filters via Weaviate) + recommendation engine"
-    status: pending
-  - id: 1.8-demo-v1
-    content: "Phase 1.8: Streamlit demo with hybrid search bar, image upload, metadata filters, and static recommendations"
-    status: pending
-  - id: 1.9-modal-poc
-    content: "Phase 1.9: Modal deployment for POC (GPU training + stateless CPU serving + Weaviate Cloud)"
-    status: pending
-  - id: 2.1-fullscale
-    content: "Phase 2.1: Full-scale data processing (1-week graph, all 105K articles, full Weaviate catalog)"
-    status: pending
-  - id: 2.2-full-train
-    content: "Phase 2.2: Full HGNN + Student MLP training on Modal with hyperparameter search"
-    status: pending
-  - id: 2.3-personal-mlp
-    content: "Phase 2.3: Personal MLP + EMA with Upstash Redis persistence and LRU cache lifecycle"
-    status: pending
-  - id: 2.4-triplet
-    content: "Phase 2.4: Triplet loss continual personalization with Upstash Redis write-back"
-    status: pending
-  - id: 2.5-simulator
-    content: "Phase 2.5: Interaction simulation engine for session replay"
-    status: pending
-  - id: 2.6-search-personalization
-    content: "Phase 2.6: Search-to-recommendation pipeline integration (search clicks feed personalization)"
-    status: pending
-  - id: 2.7-demo-v2
-    content: "Phase 2.7: Streamlit interactive demo with hybrid search, real-time personalization, and re-ranked results"
-    status: pending
-  - id: 2.8-modal-prod
-    content: "Phase 2.8: Modal production deployment with /search, /recommend, /interact, /adapt, /retrain endpoints"
-    status: pending
-  - id: 3.1-eval
-    content: "Phase 3.1: Evaluation framework (P@K, R@K, F1@K for recs + MRR/nDCG for search)"
-    status: pending
-  - id: 3.2-ablation
-    content: "Phase 3.2: Ablation studies (4 configurations matching paper Table 4)"
-    status: pending
-  - id: 3.3-profiling
-    content: "Phase 3.3: Latency and memory profiling (Weaviate queries, Upstash Redis round-trips, LRU hit rates)"
-    status: pending
-  - id: 3.4-sensitivity
-    content: "Phase 3.4: Hyperparameter sensitivity analysis (alpha, SGD steps, margin, lifespan, LRU size, Redis TTL)"
-    status: pending
-  - id: 3.5-reporting
-    content: "Phase 3.5: Final documentation, results notebook, and delta analysis vs paper"
-    status: pending
-isProject: false
----
-
 # Real-Time Personalized Fashion Recommender with Hybrid Search: Project Execution Plan
 
 ## Critical Design Constraints
@@ -171,6 +92,8 @@ Realtime-fashion-/
     - For each user, take all pairs of purchased articles within a session/time window.
     - Edge weight = number of distinct users who co-purchased both items.
   - Since the H&M dataset only has purchases, create a **single edge type** ("co-purchased") for the POC. (Phase 2 will explore synthetic multi-relation edges derived from purchase frequency buckets.)
+  - **⚠️ Critical H&M limitation:** The paper uses 4 interaction types (co-clicked, co-favorite, co-cart, co-purchased) with γ = [1.0, 0.5, 0.5, 0.1]. With only purchases, the contrastive loss (Eq. 3) reduces to a single term. This limits the heterogeneous advantage but the distillation-personalization pipeline still provides significant gains (paper Table 3: F1 improves from 276→298 with 2-week personalization).
+  - **Negative sampling:** Since H&M has no implicit feedback (no "shown but not clicked"), negative examples for Triplet Loss in Phase 2 must be **random negatives** from the catalog, not hard negatives from displayed-but-not-interacted items. This will reduce adaptation effectiveness compared to the paper's e-commerce dataset results.
   - Store as a PyTorch Geometric `HeteroData` object.
   - Node features = FashionCLIP embeddings (512-dim).
 - **Input:** `data/subset/transactions.csv`, `data/processed/clip_embeddings.pt`
@@ -364,12 +287,14 @@ Realtime-fashion-/
     7. After adaptation: mark the LRU entry as dirty, eager flush to Upstash Redis (`SET mlp:{user_id} <payload> EX <ttl>`). The TTL is refreshed on every write, keeping the user alive.
   - Trigger adaptation every N interactions (paper: every 1-9 interactions).
   - After adaptation, re-rank recommendations using the updated Personal MLP (Step 2.3's two-stage approach). No need to update any Weaviate collection -- the global `ProductRec` is unchanged; only the re-ranking weights differ.
-- Hyperparameter grid for online personalization (Table 5 from paper):
-  - SGD steps: `{1, 2, 3, 5, 10, 20, 35, 50}`
-  - Learning rate: `{1e-3, 1e-4, 1e-5}`
-  - Alpha (EMA): `{0.1, 0.3, 0.5, 0.7, 0.9}`
-  - Batch size: `{3, 5, 7}`
-  - Margin: `{1, 100}`
+- Hyperparameter grid for online personalization (**exactly matching paper Table 5**):
+  - SGD steps: `{1, 2, 3, 4, 5, 10, 20, 35, 50, 65, 80}`
+  - Learning rate: `{1e-2, 1e-3, 1e-4, 1e-5, 1e-6}`
+  - Weight decay: `{1e-5, 1e-6, 1e-7, 0}`
+  - Alpha (EMA): `{0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0}`
+  - Batch size: `{1, 2, 3, 5, 7, 9}`
+  - Margin: `{1, 100, ∞}`
+- **⚠️ Note on H&M negatives:** Since H&M has no click data, negative examples for triplet loss are **random catalog items** rather than "displayed but not clicked" items. For the Streamlit demo, search results shown but not clicked CAN serve as hard negatives, but this signal is only available in real-time usage, not in offline simulation.
 - **Input:** User interaction stream (article clicks), user's Personal MLP (from LRU/Upstash Redis)
 - **Output:** Updated Personal MLP weights flushed to Upstash Redis (with TTL refresh), updated EMA vector
 
@@ -384,7 +309,8 @@ Realtime-fashion-/
     4. After each interaction, generate top-K recommendations (two-stage: Weaviate retrieval + Personal MLP re-ranking) and compare against ground truth (next T=12 purchases).
   - Support two modes from the paper:
     - **Day-by-day cold start:** Delete the user's Redis key (or local dict entry) at end of each day.
-    - **Multi-week personalization:** Keep the user's state across days.
+    - **Multi-week personalization:** Keep the user's state across days (1 week, 2 weeks, 3 weeks).
+  - **⚠️ Key paper finding (Table 2 & 3):** Optimal personalization lifespan is **1-2 weeks**. Performance degrades after 2-3 weeks (e-commerce dataset: F1 drops from 407→354 between 1-week and 3-week personalization). On H&M, the optimal window is 2 weeks (F1=298 vs 284 for 1-week). The simulator must test ALL windows to reproduce this finding.
   - For batch simulation, use `LocalDictBackend` to avoid network overhead. For production-realistic testing, use `UpstashRedisBackend`. The `MLPLifecycleManager`'s pluggable backend (defined in Step 2.3) makes this seamless.
 - **Input:** Test transaction data (simulated future), trained models, Weaviate
 - **Output:** Per-user recommendation logs, ground-truth comparisons
