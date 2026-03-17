@@ -1,0 +1,44 @@
+# ============================================================
+# Online Personalization Hyperparameters (Paper Table 5 - right)
+# ============================================================
+
+personal_mlp:
+  # Architecture (same as Student MLP)
+  layers: [512, 256, 128, 64]
+  activation: "relu"
+
+  # EMA (Equation 5)
+  alpha: 0.5                    # search: {0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0}
+
+  # Triplet Loss Adaptation (Equations 6-7)
+  sgd_steps: 5                  # search: {1, 2, 3, 4, 5, 10, 20, 35, 50, 65, 80}
+  learning_rate: 1.0e-4         # search: {1e-2, 1e-3, 1e-4, 1e-5, 1e-6}
+  weight_decay: 1.0e-6          # search: {1e-5, 1e-6, 1e-7, 0}
+  margin: 100                   # search: {1, 100, inf}
+  adaptation_batch_size: 5      # search: {1, 2, 3, 5, 7, 9}
+  trigger_every_n_interactions: 5
+
+  # MLP Lifecycle
+  lru_cache_max_size: 200
+  redis_ttl_days: 14
+  flush_strategy: "eager"       # {eager, lazy}
+
+  # Serialization
+  serialized_size_kb: 700       # approximate
+
+# Recommendation
+recommendation:
+  candidate_retrieval_k: 100    # Weaviate top-K candidates
+  final_top_k: 10               # re-ranked output
+  distance_metric: "euclidean"  # paper uses Euclidean in 64-dim space
+
+# Evaluation
+evaluation:
+  top_k: 10                     # K in P@K, R@K
+  ground_truth_t: 12            # next T purchases as ground truth
+  num_random_weeks: 3           # 3 random weeks for evaluation
+  personalization_windows:      # days to keep personalization alive
+    - 1    # day-by-day cold start
+    - 7    # 1 week
+    - 14   # 2 weeks (optimal on H&M per paper Table 3)
+    - 21   # 3 weeks
