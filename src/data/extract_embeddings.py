@@ -1,15 +1,3 @@
-"""
-FashionCLIP Embedding Extraction.
-
-Owner: Member 3 (Search & Infrastructure)
-
-Extracts 512-dim image embeddings using FashionCLIP vision encoder.
-All embeddings are L2-normalized for cosine similarity in Weaviate.
-
-Usage:
-    python -m src.data.extract_embeddings --image_dir data/raw/images --output data/processed/clip_embeddings.pt
-"""
-
 import os
 import logging
 from pathlib import Path
@@ -21,18 +9,13 @@ from PIL import Image
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
-
+logging.basicConfig(level=logging.INFO)
 
 class FashionCLIPExtractor:
-    """Extract image embeddings using FashionCLIP (patrickjohncyh/fashion-clip)."""
 
     def __init__(self, model_name: str = "patrickjohncyh/fashion-clip", device: Optional[str] = None):
         """
         Initialize the FashionCLIP extractor.
-
-        Args:
-            model_name: HuggingFace model name for FashionCLIP.
-            device: Device to run on ('cuda', 'cpu', or None for auto-detect).
         """
         from transformers import CLIPModel, CLIPProcessor
 
@@ -43,21 +26,27 @@ class FashionCLIPExtractor:
         self.processor = CLIPProcessor.from_pretrained(model_name)
         self.model.eval()
 
-        self.embedding_dim = self.model.config.projection_dim  # 512
+        self.embedding_dim = self.model.config.projection_dim
+
+    @torch.no_grad()
+    def extract_text_embedding(self, text: str) -> torch.Tensor:
+        """
+        Extract a single text embedding.
+        """
+        inputs = self.processor(text=text, return_tensors="pt").to(self.device)
+        output = self.model.get_text_features(**inputs)
+        embedding = output.pooler_output if not isinstance(output, torch.Tensor) else output
+        embedding = F.normalize(embedding, p=2, dim=-1)
+        return embedding.squeeze(0).cpu()
 
     @torch.no_grad()
     def extract_image_embedding(self, image: Image.Image) -> torch.Tensor:
         """
         Extract a single image embedding.
-
-        Args:
-            image: PIL Image.
-
-        Returns:
-            L2-normalized embedding tensor of shape [512].
         """
         inputs = self.processor(images=image, return_tensors="pt").to(self.device)
-        embedding = self.model.get_image_features(**inputs)
+        output = self.model.get_image_features(**inputs)
+        embedding = output.pooler_output if not isinstance(output, torch.Tensor) else output
         embedding = F.normalize(embedding, p=2, dim=-1)
         return embedding.squeeze(0).cpu()
 
@@ -65,20 +54,14 @@ class FashionCLIPExtractor:
     def extract_batch(self, images: List[Image.Image], batch_size: int = 32) -> torch.Tensor:
         """
         Extract embeddings for a batch of images.
-
-        Args:
-            images: List of PIL Images.
-            batch_size: Processing batch size.
-
-        Returns:
-            L2-normalized embeddings tensor of shape [N, 512].
         """
         all_embeddings = []
 
         for i in range(0, len(images), batch_size):
             batch = images[i : i + batch_size]
             inputs = self.processor(images=batch, return_tensors="pt").to(self.device)
-            embeddings = self.model.get_image_features(**inputs)
+            output = self.model.get_image_features(**inputs)
+            embeddings = output.pooler_output if not isinstance(output, torch.Tensor) else output
             embeddings = F.normalize(embeddings, p=2, dim=-1)
             all_embeddings.append(embeddings.cpu())
 
@@ -92,17 +75,6 @@ class FashionCLIPExtractor:
     ) -> Dict[str, torch.Tensor]:
         """
         Extract embeddings for all images in a directory.
-
-        H&M image structure: images/{0-prefix}/{article_id}.jpg
-        e.g., images/010/0108775015.jpg
-
-        Args:
-            image_dir: Root directory containing product images.
-            article_ids: Optional list of article IDs to process (if None, process all).
-            batch_size: Processing batch size.
-
-        Returns:
-            Dict mapping article_id -> L2-normalized embedding tensor [512].
         """
         image_dir = Path(image_dir)
         embeddings = {}
@@ -111,9 +83,8 @@ class FashionCLIPExtractor:
         if article_ids is not None:
             image_paths = []
             for aid in article_ids:
-                # H&M image naming: 0{article_id[:3]}/{article_id}.jpg
-                prefix = f"0{aid[:2]}"
-                img_path = image_dir / prefix / f"0{aid}.jpg"
+                prefix = f"{aid[:3]}"
+                img_path = image_dir / prefix / f"{aid}.jpg"
                 if img_path.exists():
                     image_paths.append((aid, img_path))
                 else:
@@ -121,7 +92,7 @@ class FashionCLIPExtractor:
         else:
             image_paths = []
             for img_file in image_dir.rglob("*.jpg"):
-                aid = img_file.stem.lstrip("0")
+                aid = img_file.stem
                 image_paths.append((aid, img_file))
 
         logger.info(f"Processing {len(image_paths)} images from {image_dir}")
@@ -163,17 +134,62 @@ def load_embeddings(path: str) -> Dict[str, torch.Tensor]:
     return embeddings
 
 
-if __name__ == "__main__":
-    import argparse
+# Inference on Modal
+# import modal
+# app = modal.App("fashion-clip-extractor")
 
-    logging.basicConfig(level=logging.INFO)
+# modal_image = (
+#     modal.Image.debian_slim(python_version="3.12")
+#     .pip_install("torch", "torchvision", "transformers", "Pillow", "tqdm")
+# )
 
-    parser = argparse.ArgumentParser(description="Extract FashionCLIP image embeddings")
-    parser.add_argument("--image_dir", required=True, help="Directory containing product images")
-    parser.add_argument("--output", default="data/processed/clip_embeddings.pt", help="Output path")
-    parser.add_argument("--batch_size", type=int, default=32)
-    args = parser.parse_args()
+# MOUNT_DIR = "/data"
+# vol = modal.Volume.from_name("fa_volume")
 
-    extractor = FashionCLIPExtractor()
-    embeddings = extractor.extract_from_directory(args.image_dir, batch_size=args.batch_size)
-    save_embeddings(embeddings, args.output)
+# @app.cls(image=modal_image, gpu="A100", volumes={MOUNT_DIR: vol}, timeout=7200)
+# class ModalCLIPExtractor:
+#     """
+#     Wrapper class to run FashionCLIPExtractor on Modal.
+#     """
+#     @modal.enter()
+#     def setup(self):
+#         self.extractor = FashionCLIPExtractor(device="cuda")
+
+#     @modal.method()
+#     def process_directory(self, input_dir_rel: str, output_file_rel: str, batch_size: int = 64):
+#         full_image_dir = f"{MOUNT_DIR}/{input_dir_rel}"
+#         full_output_path = f"{MOUNT_DIR}/{output_file_rel}"
+        
+#         logger.info(f"Modal is reading images from: {full_image_dir}")
+        
+#         embeddings = self.extractor.extract_from_directory(
+#             image_dir=full_image_dir,
+#             batch_size=batch_size
+#         )
+        
+#         save_embeddings(embeddings, full_output_path)
+        
+#         vol.commit()
+#         return f"Successfully saved to {full_output_path} on Modal Volume"
+
+# @app.local_entrypoint()
+# def main(
+#     image_dir: str = "subset_1week/images",
+#     output: str = "processed/clip_embeddings.pt",
+#     batch_size: int = 64
+# ):
+#     logger.info("Initializing connection to Modal GPU...")
+    
+#     modal_extractor = ModalCLIPExtractor()
+    
+#     result_msg = modal_extractor.process_directory.remote(
+#         input_dir_rel=image_dir,
+#         output_file_rel=output,
+#         batch_size=batch_size
+#     )
+    
+#     logger.info(f"☁️ MODAL RESPONSE: {result_msg}")
+
+embedds = load_embeddings("clip_embeddings.pt")
+keys = list(embedds.keys())
+print(keys[:1])
