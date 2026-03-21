@@ -135,61 +135,57 @@ def load_embeddings(path: str) -> Dict[str, torch.Tensor]:
 
 
 # Inference on Modal
-# import modal
-# app = modal.App("fashion-clip-extractor")
+import modal
+app = modal.App("fashion-clip-extractor")
 
-# modal_image = (
-#     modal.Image.debian_slim(python_version="3.12")
-#     .pip_install("torch", "torchvision", "transformers", "Pillow", "tqdm")
-# )
+modal_image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .pip_install("torch", "torchvision", "transformers", "Pillow", "tqdm")
+)
 
-# MOUNT_DIR = "/data"
-# vol = modal.Volume.from_name("fa_volume")
+MOUNT_DIR = "/data"
+vol = modal.Volume.from_name("fa_volume")
 
-# @app.cls(image=modal_image, gpu="A100", volumes={MOUNT_DIR: vol}, timeout=7200)
-# class ModalCLIPExtractor:
-#     """
-#     Wrapper class to run FashionCLIPExtractor on Modal.
-#     """
-#     @modal.enter()
-#     def setup(self):
-#         self.extractor = FashionCLIPExtractor(device="cuda")
+@app.cls(image=modal_image, gpu="A100", volumes={MOUNT_DIR: vol}, timeout=7200)
+class ModalCLIPExtractor:
+    """
+    Wrapper class to run FashionCLIPExtractor on Modal.
+    """
+    @modal.enter()
+    def setup(self):
+        self.extractor = FashionCLIPExtractor(device="cuda")
 
-#     @modal.method()
-#     def process_directory(self, input_dir_rel: str, output_file_rel: str, batch_size: int = 64):
-#         full_image_dir = f"{MOUNT_DIR}/{input_dir_rel}"
-#         full_output_path = f"{MOUNT_DIR}/{output_file_rel}"
+    @modal.method()
+    def process_directory(self, input_dir_rel: str, output_file_rel: str, batch_size: int = 64):
+        full_image_dir = f"{MOUNT_DIR}/{input_dir_rel}"
+        full_output_path = f"{MOUNT_DIR}/{output_file_rel}"
         
-#         logger.info(f"Modal is reading images from: {full_image_dir}")
+        logger.info(f"Modal is reading images from: {full_image_dir}")
         
-#         embeddings = self.extractor.extract_from_directory(
-#             image_dir=full_image_dir,
-#             batch_size=batch_size
-#         )
+        embeddings = self.extractor.extract_from_directory(
+            image_dir=full_image_dir,
+            batch_size=batch_size
+        )
         
-#         save_embeddings(embeddings, full_output_path)
+        save_embeddings(embeddings, full_output_path)
         
-#         vol.commit()
-#         return f"Successfully saved to {full_output_path} on Modal Volume"
+        vol.commit()
+        return f"Successfully saved to {full_output_path} on Modal Volume"
 
-# @app.local_entrypoint()
-# def main(
-#     image_dir: str = "subset_1week/images",
-#     output: str = "processed/clip_embeddings.pt",
-#     batch_size: int = 64
-# ):
-#     logger.info("Initializing connection to Modal GPU...")
+@app.local_entrypoint()
+def main(
+    image_dir: str = "subset_1week/images",
+    output: str = "processed/clip_embeddings.pt",
+    batch_size: int = 64
+):
+    logger.info("Initializing connection to Modal GPU...")
     
-#     modal_extractor = ModalCLIPExtractor()
+    modal_extractor = ModalCLIPExtractor()
     
-#     result_msg = modal_extractor.process_directory.remote(
-#         input_dir_rel=image_dir,
-#         output_file_rel=output,
-#         batch_size=batch_size
-#     )
+    result_msg = modal_extractor.process_directory.remote(
+        input_dir_rel=image_dir,
+        output_file_rel=output,
+        batch_size=batch_size
+    )
     
-#     logger.info(f"☁️ MODAL RESPONSE: {result_msg}")
-
-embedds = load_embeddings("clip_embeddings.pt")
-keys = list(embedds.keys())
-print(keys[:1])
+    logger.info(f"☁️ MODAL RESPONSE: {result_msg}")
