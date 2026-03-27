@@ -1,0 +1,48 @@
+# Core ML
+torch>=2.1.0
+torch-geometric>=2.4.0
+torchvision>=0.16.0
+
+# Transformers & CLIP
+transformers>=4.36.0
+fashion-clip>=0.2.0
+Pillow>=10.0.0
+
+# Vector DB & Storage
+weaviate-client>=4.4.0
+upstash-redis>=1.0.0
+
+# Serverless Deployment
+modal>=0.60.0
+
+# Frontend
+streamlit>=1.30.0
+
+# Data
+pandas>=2.1.0
+numpy>=1.24.0
+pyarrow>=14.0.0
+kaggle>=1.6.0
+
+# Config & Logging
+pyyaml>=6.0.0
+wandb>=0.16.0
+
+# Evaluation & Visualization
+scikit-learn>=1.3.0
+matplotlib>=3.8.0
+seaborn>=0.13.0
+plotly>=5.18.0
+
+# Utilities
+tqdm>=4.66.0
+python-dotenv>=1.0.0
+
+# API
+fastapi>=0.109.0
+uvicorn>=0.25.0
+pydantic>=2.5.0
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
