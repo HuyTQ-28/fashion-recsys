@@ -1,10 +1,10 @@
 import os
 import torch
 import pandas as pd
+
 from hgnn_model.model import HGNN
-from hgnn_model.loss import contrastive_loss
-from hgnn_model.build_graph import build_graph, build_edges_only
-from hgnn_model.data_split import split_by_time
+from hgnn_model.loss import hgnn_contrastive_loss_margin
+from hgnn_model.build_graph import build_graph_hgnn
 
 
 def train():
@@ -13,86 +13,132 @@ def train():
 
     DATA_DIR = os.getenv("DATA_DIR", "../data")
 
-    transactions_path = f"{DATA_DIR}/transactions_train.csv"
+    data_path = f"{DATA_DIR}/fake_behavior.csv"
     clip_path = f"{DATA_DIR}/clip_embeddings.pt"
-    save_path = f"{DATA_DIR}/article_embeddings2.pt"
+    save_path = f"{DATA_DIR}/article_embeddings_hgnn3.pt"
 
+    # ===== LOAD DATA =====
+    data = pd.read_csv(data_path)
+    data["article_id"] = data["article_id"].astype(str).str.zfill(10)
 
-    # 🔥 TRAIN GRAPH
-    trans = pd.read_csv(transactions_path)
-    trans["article_id"]=trans["article_id"].astype(str).str.zfill(10)
-    edge_index, id2idx = build_graph(trans)
+    # ===== BUILD GRAPH =====
+    edge_index_dict, edge_weight_dict, id2idx = build_graph_hgnn(data)
+    for aid, idx in id2idx.items():
+        print(f"aid_graph:{aid}")
+        break
 
-    # 🔥 VAL EDGES (không rebuild graph)
-    # val_edge_index = build_edges_only(val_df, id2idx)
-
-    # load CLIP
+    # ===== LOAD CLIP EMB =====
     clip_data = torch.load(clip_path)
+    for i, key in enumerate(list(clip_data.keys())[:1]):
+        print(f"clip_key: {key}")
 
     num_nodes = len(id2idx)
-    X = torch.zeros(num_nodes, 512)
+
+    # 🔥 IMPORTANT: random init instead of zero
+    X = torch.randn(num_nodes, 512) * 0.01
 
     for aid, idx in id2idx.items():
         if aid in clip_data:
             X[idx] = clip_data[aid]
 
     X = X.to(device)
-    edge_index = edge_index.to(device)
 
-    # if val_edge_index is not None:
-    #     val_edge_index = val_edge_index.to(device)
+    # ===== MOVE GRAPH TO DEVICE =====
+    for rel in edge_index_dict:
+        edge_index_dict[rel] = edge_index_dict[rel].to(device)
+        edge_weight_dict[rel] = edge_weight_dict[rel].to(device)
 
+    # ===== MODEL =====
     model = HGNN().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
 
-    # 🔥 EARLY STOP
-    # best_val_loss = float("inf")
-    # patience = 5
-    # counter = 0
+    relation_weights = {
+        "click": 1.0,
+        "cart": 2.0,
+        "purchase": 3.0
+    }
 
-    for epoch in range(80):
-        # ===== TRAIN =====
+    sample_size = 100_000  # 🔥 giảm cho ổn định hơn
+
+    # ===== TRAIN LOOP =====
+    for epoch in range(130):
         model.train()
-        emb = model(X, edge_index)
 
-        train_loss = contrastive_loss(emb, edge_index, num_nodes)
+        emb = model(X, edge_index_dict)
+        # ===== DEBUG DISTANCE =====
+        if epoch % 5 == 0:  # in mỗi 5 epoch cho đỡ spam
+            with torch.no_grad():
+                # lấy 1 relation bất kỳ (ví dụ purchase)
+                rel = "purchase"
+                edge_index = edge_index_dict[rel]
+
+                num_edges = edge_index.shape[1]
+                sample_size_debug = min(5000, num_edges)
+
+                idx = torch.randperm(num_edges, device=device)[:sample_size_debug]
+                edge_index_sample = edge_index[:, idx]
+
+                src, pos = edge_index_sample
+
+                pos_dist = ((emb[src] - emb[pos])**2).sum(dim=1).mean()
+
+                neg_idx = torch.randint(
+                    0, num_nodes,
+                    (len(src),),
+                    device=emb.device
+                )
+                neg_dist = ((emb[src] - emb[neg_idx])**2).sum(dim=1).mean()
+
+                print(f"[DEBUG] pos_dist: {pos_dist:.4f}, neg_dist: {neg_dist:.4f}")
+
+        if epoch == 0:
+            print("Embedding norm:", emb.norm(dim=1).mean().item())
+
+        total_loss = 0
+        total_weight = 0
+
+        for rel in edge_index_dict:
+            edge_index = edge_index_dict[rel]
+            edge_weight = edge_weight_dict[rel]
+
+            num_edges = edge_index.shape[1]
+
+            # ===== SAMPLE EDGES =====
+            if num_edges > sample_size:
+                idx = torch.randperm(num_edges, device=device)[:sample_size]
+                edge_index_sample = edge_index[:, idx]
+                edge_weight_sample = edge_weight[idx]
+            else:
+                edge_index_sample = edge_index
+                edge_weight_sample = edge_weight
+
+            loss = hgnn_contrastive_loss_margin(
+                emb,
+                edge_index_sample,
+                edge_weight_sample,
+                num_nodes,
+                num_neg=10,
+                margin=1.0
+            )
+
+            w = relation_weights.get(rel, 1.0)
+
+            total_loss += w * loss
+            total_weight += w
+
+        total_loss = total_loss / total_weight
 
         optimizer.zero_grad()
-        train_loss.backward()
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)  # 🔥 ổn định gradient
         optimizer.step()
 
-        # ===== VALIDATION =====
-        # model.eval()
-        # with torch.no_grad():
-        #     if val_edge_index is not None:
-        #         val_loss = contrastive_loss(emb, val_edge_index, num_nodes)
-        #         val_loss_val = val_loss.item()
-        #     else:
-        #         val_loss_val = None
+        print(f"Epoch {epoch:02d} | Loss: {total_loss.item():.4f}")
 
-        # print(f"Epoch {epoch} - Train Loss: {train_loss.item():.4f} | Val Loss: {val_loss_val}")
-        print(f"Epoch {epoch} - Train Loss: {train_loss.item():.4f}")
+    # ===== SAVE =====
+    torch.save({
+        "embeddings": emb.detach().cpu(),
+        "id2idx": id2idx
+    }, save_path)
 
-        # ===== EARLY STOP =====
-        # if val_loss_val is not None:
-        #     if val_loss_val < best_val_loss:
-        #         best_val_loss = val_loss_val
-        #         counter = 0
-
-        #         # save best model
-        #         torch.save({
-        #             "embeddings": emb.detach().cpu(),
-        #             "id2idx": id2idx
-        #         }, save_path)
-
-        #     else:
-        #         counter += 1
-
-        #     if counter >= patience:
-        #         print("Early stopping triggered!")
-        #         break
-
-    # save split
-    # train_df.to_csv(f"{DATA_DIR}/train_split.csv", index=False)
-    # val_df.to_csv(f"{DATA_DIR}/val_split.csv", index=False)
-    # test_df.to_csv(f"{DATA_DIR}/test_split.csv", index=False)
+    print(f"Training completed & embeddings saved in {save_path}")
