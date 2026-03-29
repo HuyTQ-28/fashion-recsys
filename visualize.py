@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 
 # load
-data = torch.load("data/article_embeddings2.pt")
+data = torch.load("data/article_embeddings_hgnn3.pt")
 emb = data["embeddings"]
 id2idx = data["id2idx"]
 
