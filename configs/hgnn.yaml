@@ -1,0 +1,49 @@
+# ============================================================
+# HGNN + Student MLP Hyperparameters (Paper Table 5 - left)
+# ============================================================
+
+hgnn:
+  # Architecture
+  structural_layers: [512, 256, 128, 64]  # alt: [512, 256, 256, 128, 64]
+  attribute_layers: [512, 256, 128, 64]   # alt: [512, 256, 256, 128, 64]
+  activation: "relu"
+
+  # Graph
+  neighborhood_agg: "mean"    # {sum, mean}
+  relation_agg: "mean"        # {sum, mean}
+  weighted_sampling: false     # {true, false}
+  num_neighbors: [8, 8, 8]
+  batch_size: 128
+
+  # Training
+  learning_rate: 1.0e-3       # search: {1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7}
+  weight_decay: 1.0e-5        # search: {1e-5, 1e-6, 1e-7, 0}
+  contrastive_margin: 1       # {1, 100}
+  early_stopping_patience: 5
+  max_epochs: 100
+
+  # Loss weights per relation type (co-clicked, co-favorite, co-cart, co-purchased)
+  # For H&M (purchase only): gamma = [1.0] (single relation)
+  gamma: [1.0, 0.5, 0.5, 0.1]
+
+student_mlp:
+  layers: [512, 256, 128, 64]
+  activation: "relu"
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-5
+  max_epochs: 100
+  early_stopping_patience: 5
+
+# Data
+data:
+  poc_date: "2020-09-15"
+  full_week_start: "2020-09-07"
+  full_week_end: "2020-09-13"
+  clip_embedding_dim: 512
+  mlp_embedding_dim: 64
+  image_size: 224
+
+# Wandb
+wandb:
+  project: "fashion-recsys"
+  entity: null  # set your wandb entity

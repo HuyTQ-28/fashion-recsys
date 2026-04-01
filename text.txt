@@ -1,0 +1,9 @@
+modal volume ls hgnn-data
+
+modal run hgnn_model/modal_app.py::train_model
+
+modal volume get hgnn-data article_embeddings2.pt data/article_embeddings2.pt
+
+modal volume get hgnn-data train_split.csv data/train_split.csv
+modal volume get hgnn-data val_split.csv data/val_split.csv
+modal volume get hgnn-data test_split.csv data/test_split.csv
