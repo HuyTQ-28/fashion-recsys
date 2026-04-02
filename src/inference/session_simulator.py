@@ -46,15 +46,19 @@ class SessionSimulator:
         trigger_every_n: int = 5,
         recommendation_k: int = 10,
         ground_truth_t: int = 12,
+        use_mlp_projection: bool = None,
     ):
         """
         Args:
             lifecycle_manager: MLP lifecycle manager (with LocalDictBackend for simulation).
-            clip_embeddings: CLIP embeddings for all articles.
+            clip_embeddings: Article embeddings (CLIP 512-dim or HGNN 64-dim).
             adaptation: TripletAdaptation instance.
             trigger_every_n: Trigger adaptation every N interactions.
             recommendation_k: Number of recommendations to generate.
             ground_truth_t: Number of future purchases as ground truth.
+            use_mlp_projection: Whether to project embeddings through Personal MLP.
+                                 Auto-detected from embedding dim if None:
+                                 True if 512-dim (CLIP), False if 64-dim (HGNN).
         """
         self.lifecycle = lifecycle_manager
         self.clip_embeddings = clip_embeddings
@@ -62,6 +66,13 @@ class SessionSimulator:
         self.trigger_every_n = trigger_every_n
         self.recommendation_k = recommendation_k
         self.ground_truth_t = ground_truth_t
+
+        # Auto-detect whether to use MLP projection
+        if use_mlp_projection is None:
+            sample = next(iter(clip_embeddings.values())) if clip_embeddings else None
+            self.use_mlp_projection = (sample is not None and sample.shape[-1] == 512)
+        else:
+            self.use_mlp_projection = use_mlp_projection
 
     def simulate_sessions(
         self,
@@ -121,7 +132,11 @@ class SessionSimulator:
             # Update EMA
             clip_emb = self.clip_embeddings[str(article_id)]
             with torch.no_grad():
-                mlp_proj = entry.personal_mlp(clip_emb.unsqueeze(0)).squeeze(0)
+                if self.use_mlp_projection:
+                    mlp_proj = entry.personal_mlp(clip_emb.unsqueeze(0)).squeeze(0)
+                else:
+                    # Embeddings already in 64-dim space (e.g. HGNN) — use directly
+                    mlp_proj = clip_emb
             entry.user_state.update(mlp_proj)
 
             # Add to interaction batch
@@ -162,7 +177,7 @@ class SessionSimulator:
         if not positives:
             return False
 
-        # Random negatives (H&M has no click data for hard negatives)
+        # Random negatives
         all_ids = list(self.clip_embeddings.keys())
         neg_ids = [
             aid for aid in all_ids
@@ -174,5 +189,7 @@ class SessionSimulator:
         if not negatives:
             return False
 
+        # Run triplet adaptation regardless of embedding dim.
+        # For HGNN 64-dim, the Personal MLP is 64→128→64 and can still be adapted.
         self.adaptation.adapt(entry.personal_mlp, positives, negatives)
         return True

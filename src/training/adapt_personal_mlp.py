@@ -83,10 +83,10 @@ def adapt_personal_mlp(
     positive_clip_embeddings: List[torch.Tensor],
     negative_clip_embeddings: List[torch.Tensor],
     interaction_weights: Optional[List[float]] = None,
-    sgd_steps: int = 5,
+    sgd_steps: int = 1,
     learning_rate: float = 1e-4,
     weight_decay: float = 1e-6,
-    margin: float = 100.0,
+    margin: float = float("inf"),
 ) -> Tuple[float, float]:
     """
     Run triplet loss adaptation on a Personal MLP in-place.
@@ -133,10 +133,10 @@ class TripletAdaptation:
 
     def __init__(
         self,
-        sgd_steps: int = 5,
+        sgd_steps: int = 1,           # best from sensitivity sweep
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-6,
-        margin: float = 100.0,
+        margin: float = float("inf"),  # best from sensitivity sweep (minimize dist_pos only)
     ):
         """
         Args:

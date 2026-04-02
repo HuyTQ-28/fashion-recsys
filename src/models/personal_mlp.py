@@ -170,7 +170,7 @@ class PersonalMLPFactory:
 
     def _load(self, path: str) -> PersonalMLP:
         """Load Student MLP from checkpoint."""
-        state_dict = torch.load(path, weights_only=True)
+        state_dict = torch.load(path, weights_only=True, map_location="cpu")
         mlp = PersonalMLP(base_model=None, layer_dims=self.layer_dims)
         # Handle both raw state_dict and wrapped dicts
         if isinstance(state_dict, dict) and "state_dict" in state_dict:

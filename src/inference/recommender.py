@@ -122,12 +122,13 @@ class Recommender:
         article_ids = list(self.clip_embeddings.keys())
         clip_stack = torch.stack([self.clip_embeddings[aid] for aid in article_ids])  # [N, 512]
 
-        if personal_mlp is not None:
+        if personal_mlp is not None and clip_stack.shape[-1] == personal_mlp.input_dim:
+            # CLIP 512-dim: project through Personal MLP → 64-dim
             personal_mlp.eval()
             with torch.no_grad():
                 all_embeddings = personal_mlp(clip_stack)  # [N, 64]
         else:
-            # cold path: just use raw CLIP — caller must ensure dim match
+            # Already in output space (HGNN 64-dim) or no MLP provided
             all_embeddings = clip_stack
 
         distances = torch.cdist(ema_vector.unsqueeze(0), all_embeddings).squeeze(0)
@@ -150,7 +151,11 @@ class Recommender:
             return candidate_ids[: self.final_k]
 
         candidate_clip = torch.stack([self.clip_embeddings[aid] for aid in valid_ids])
-        projected = personal_mlp(candidate_clip)  # [N, 64]
+        # Project only if embeddings are in input space (512-dim CLIP)
+        if candidate_clip.shape[-1] == personal_mlp.input_dim:
+            projected = personal_mlp(candidate_clip)  # [N, 64]
+        else:
+            projected = candidate_clip  # already 64-dim (HGNN)
         distances = torch.cdist(ema_vector.unsqueeze(0), projected).squeeze(0)  # [N]
         _, sorted_indices = distances.sort()
         return [valid_ids[i] for i in sorted_indices[: self.final_k].tolist()]
@@ -175,7 +180,7 @@ class PersonalizationEngine:
         lifecycle: MLPLifecycleManager,
         clip_embeddings: Dict[str, torch.Tensor],
         adaptation: Optional[TripletAdaptation] = None,
-        trigger_every_n: int = 5,
+        trigger_every_n: int = 9,  # best from sensitivity sweep
         candidate_k: int = 100,
         final_k: int = 10,
     ):
@@ -266,9 +271,12 @@ class PersonalizationEngine:
         entry = self.lifecycle.get_or_create(user_id)
         clip_emb = self.clip_embeddings[article_id]
 
-        # Update EMA
+        # Update EMA — bypass MLP if embeddings already in output space (64-dim HGNN)
         with torch.no_grad():
-            mlp_proj = entry.personal_mlp(clip_emb.unsqueeze(0)).squeeze(0)
+            if clip_emb.shape[-1] == entry.personal_mlp.input_dim:
+                mlp_proj = entry.personal_mlp(clip_emb.unsqueeze(0)).squeeze(0)
+            else:
+                mlp_proj = clip_emb  # already 64-dim
         entry.user_state.update_ema(mlp_proj)
 
         # Record raw interaction for triplet adaptation
@@ -346,5 +354,7 @@ class PersonalizationEngine:
         if not negatives:
             return False, None
 
+        # Run triplet adaptation regardless of embedding dim.
+        # For HGNN 64-dim, the Personal MLP is 64→128→64 and can still be adapted.
         _, adaptation_time_ms = self.adaptation.adapt(entry.personal_mlp, positives, negatives)
         return True, adaptation_time_ms

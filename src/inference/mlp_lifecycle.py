@@ -208,7 +208,7 @@ class MLPLifecycleManager:
         backend: StorageBackend,
         max_size: int = 200,
         ttl_seconds: int = 14 * 24 * 3600,  # 14 days
-        alpha: float = 0.5,
+        alpha: float = 0.7,  # best from sensitivity sweep
         # legacy kwarg aliases
         student_mlp=None,
         layer_dims=None,
