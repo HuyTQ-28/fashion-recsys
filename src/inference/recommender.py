@@ -1,5 +1,5 @@
 """
-Recommendation Engine.
+Recommendation Engine & Personalization Engine.
 
 Owner: Member 2 (Personalization Engine)
 
@@ -7,42 +7,48 @@ Two-stage personalized recommendations:
 1. Recall: Weaviate ProductRec KNN with EMA user vector -> top-100 candidates
 2. Re-rank: Personal MLP re-projects candidates, sort by Euclidean distance to EMA
 
-Cold users (no Personal MLP): use global Student MLP embeddings from Weaviate.
+Cold users (no interactions yet): item-to-item KNN on global Student MLP embeddings.
+
+PersonalizationEngine wraps the full pipeline for M3's API.
 """
 
 import logging
 from typing import Dict, List, Optional
 
 import torch
-import weaviate
-from weaviate.classes.query import MetadataQuery
 
-from src.models.personal_mlp import PersonalMLP
+from src.models.personal_mlp import PersonalMLP, PersonalMLPFactory
 from src.inference.user_state import UserState
+from src.inference.mlp_lifecycle import MLPLifecycleManager, LocalDictBackend
+from src.training.adapt_personal_mlp import TripletAdaptation
 
 logger = logging.getLogger(__name__)
 
+
+# ============================================================
+# Low-level Recommender (2-stage recall + re-rank)
+# ============================================================
 
 class Recommender:
     """
     Two-stage personalized recommendation engine.
 
-    Stage 1 (Recall): Weaviate KNN on ProductRec collection.
+    Stage 1 (Recall): in-memory KNN on CLIP embeddings (fallback when no Weaviate).
     Stage 2 (Re-rank): Personal MLP re-ranking of candidates.
     """
 
     def __init__(
         self,
-        weaviate_client: Optional[weaviate.WeaviateClient] = None,
+        weaviate_client=None,
         clip_embeddings: Optional[Dict[str, torch.Tensor]] = None,
         candidate_k: int = 100,
         final_k: int = 10,
     ):
         """
         Args:
-            weaviate_client: Connected Weaviate client (for ProductRec collection).
-            clip_embeddings: Pre-loaded CLIP embeddings for re-ranking (article_id -> Tensor[512]).
-            candidate_k: Number of candidates to retrieve from Weaviate.
+            weaviate_client: Connected Weaviate client (optional).
+            clip_embeddings: Pre-loaded CLIP embeddings (article_id -> Tensor[512]).
+            candidate_k: Number of candidates to retrieve.
             final_k: Number of final recommendations to return.
         """
         self.weaviate_client = weaviate_client
@@ -52,51 +58,26 @@ class Recommender:
 
     def recommend_cold(self, seed_article_id: str) -> List[str]:
         """
-        Cold-start recommendations: item-to-item KNN via Weaviate ProductRec.
+        Cold-start recommendations: item-to-item KNN on CLIP embeddings.
 
         Args:
-            seed_article_id: Article ID to get recommendations for.
+            seed_article_id: Seed article ID.
 
         Returns:
-            List of recommended article IDs.
+            List of recommended article IDs (excluding seed).
         """
-        if self.weaviate_client is None:
+        if seed_article_id not in self.clip_embeddings:
             return []
 
-        collection = self.weaviate_client.collections.get("ProductRec")
-
-        # Get seed article's vector from Weaviate
-        result = collection.query.fetch_object_by_id(
-            # We need to find by article_id property
-        )
-
-        # Query by near_vector with seed article's embedding
-        # (In practice, look up the seed's MLP embedding from Weaviate)
-        # Simplified: use the collection's near_object query
-        results = collection.query.bm25(
-            query=seed_article_id,
-            limit=1,
-        )
-
-        if not results.objects:
+        seed_emb = self.clip_embeddings[seed_article_id].unsqueeze(0)  # [1, 512]
+        article_ids = [aid for aid in self.clip_embeddings if aid != seed_article_id]
+        if not article_ids:
             return []
 
-        seed_vector = results.objects[0].vector
-        if seed_vector is None:
-            return []
-
-        # KNN search
-        recommendations = collection.query.near_vector(
-            near_vector=seed_vector,
-            limit=self.final_k + 1,  # +1 to exclude seed
-            return_metadata=MetadataQuery(distance=True),
-        )
-
-        return [
-            obj.properties["article_id"]
-            for obj in recommendations.objects
-            if obj.properties["article_id"] != seed_article_id
-        ][: self.final_k]
+        all_embs = torch.stack([self.clip_embeddings[aid] for aid in article_ids])
+        distances = torch.cdist(seed_emb, all_embs).squeeze(0)
+        _, indices = distances.topk(self.final_k, largest=False)
+        return [article_ids[i] for i in indices.tolist()]
 
     def recommend_personalized(
         self,
@@ -104,13 +85,10 @@ class Recommender:
         personal_mlp: PersonalMLP,
     ) -> List[str]:
         """
-        Personalized recommendations: Weaviate recall + Personal MLP re-rank.
-
-        Stage 1: Retrieve top-K candidates from Weaviate ProductRec using EMA vector.
-        Stage 2: Re-project candidates through Personal MLP, re-rank by distance.
+        Personalized recommendations: candidate recall + Personal MLP re-rank.
 
         Args:
-            user_state: User's EMA state (contains u_t vector).
+            user_state: User's EMA state.
             personal_mlp: User's Personal MLP.
 
         Returns:
@@ -120,44 +98,41 @@ class Recommender:
         if ema_vector is None:
             return []
 
-        # Stage 1: Weaviate candidate retrieval
-        candidate_ids = self._retrieve_candidates(ema_vector)
+        candidate_ids = self._retrieve_candidates_local(ema_vector, personal_mlp)
         if not candidate_ids:
             return []
 
-        # Stage 2: Personal MLP re-ranking
         return self._rerank(candidate_ids, ema_vector, personal_mlp)
 
-    def _retrieve_candidates(self, ema_vector: torch.Tensor) -> List[str]:
-        """Retrieve top-K candidates from Weaviate ProductRec."""
-        if self.weaviate_client is None:
-            # Fallback: simple KNN on in-memory embeddings
-            return self._retrieve_candidates_local(ema_vector)
-
-        collection = self.weaviate_client.collections.get("ProductRec")
-
-        results = collection.query.near_vector(
-            near_vector=ema_vector.tolist(),
-            limit=self.candidate_k,
-        )
-
-        return [obj.properties["article_id"] for obj in results.objects]
-
-    def _retrieve_candidates_local(self, ema_vector: torch.Tensor) -> List[str]:
+    def _retrieve_candidates_local(
+        self,
+        ema_vector: torch.Tensor,
+        personal_mlp: Optional[PersonalMLP] = None,
+    ) -> List[str]:
         """
-        Fallback: in-memory KNN when Weaviate is not available.
-        Used during development with mock data.
+        In-memory KNN candidate retrieval.
+
+        Compares ema_vector (64-dim) against MLP-projected embeddings.
+        If personal_mlp is provided, projects CLIP embeddings on the fly;
+        otherwise falls back to direct distance (useful for cold start).
         """
         if not self.clip_embeddings:
             return []
 
         article_ids = list(self.clip_embeddings.keys())
-        all_embeddings = torch.stack([self.clip_embeddings[aid] for aid in article_ids])
+        clip_stack = torch.stack([self.clip_embeddings[aid] for aid in article_ids])  # [N, 512]
 
-        # Simple Euclidean distance KNN
+        if personal_mlp is not None:
+            personal_mlp.eval()
+            with torch.no_grad():
+                all_embeddings = personal_mlp(clip_stack)  # [N, 64]
+        else:
+            # cold path: just use raw CLIP — caller must ensure dim match
+            all_embeddings = clip_stack
+
         distances = torch.cdist(ema_vector.unsqueeze(0), all_embeddings).squeeze(0)
-        _, indices = distances.topk(self.candidate_k, largest=False)
-
+        k = min(self.candidate_k, len(article_ids))
+        _, indices = distances.topk(k, largest=False)
         return [article_ids[i] for i in indices.tolist()]
 
     @torch.no_grad()
@@ -167,28 +142,209 @@ class Recommender:
         ema_vector: torch.Tensor,
         personal_mlp: PersonalMLP,
     ) -> List[str]:
-        """
-        Re-rank candidates using the user's Personal MLP.
-
-        Projects each candidate's CLIP embedding through the Personal MLP,
-        computes Euclidean distance to the user's EMA vector.
-        """
+        """Re-rank candidates using the user's Personal MLP."""
         personal_mlp.eval()
 
-        # Get CLIP embeddings for candidates
         valid_ids = [aid for aid in candidate_ids if aid in self.clip_embeddings]
         if not valid_ids:
             return candidate_ids[: self.final_k]
 
         candidate_clip = torch.stack([self.clip_embeddings[aid] for aid in valid_ids])
-
-        # Project through Personal MLP
         projected = personal_mlp(candidate_clip)  # [N, 64]
-
-        # Euclidean distance to EMA vector
         distances = torch.cdist(ema_vector.unsqueeze(0), projected).squeeze(0)  # [N]
-
-        # Sort by distance (ascending = closest first)
         _, sorted_indices = distances.sort()
-
         return [valid_ids[i] for i in sorted_indices[: self.final_k].tolist()]
+
+
+# ============================================================
+# PersonalizationEngine — high-level API for M3
+# ============================================================
+
+class PersonalizationEngine:
+    """
+    High-level personalization API.
+
+    Wraps MLPLifecycleManager + Recommender into the contract expected by M3:
+        engine.get_recommendations(user_id, seed_article_id, k)
+        engine.handle_interaction(user_id, article_id, interaction_type, shown_articles)
+        engine.get_user_state(user_id)
+    """
+
+    def __init__(
+        self,
+        lifecycle: MLPLifecycleManager,
+        clip_embeddings: Dict[str, torch.Tensor],
+        adaptation: Optional[TripletAdaptation] = None,
+        trigger_every_n: int = 5,
+        candidate_k: int = 100,
+        final_k: int = 10,
+    ):
+        """
+        Args:
+            lifecycle: MLPLifecycleManager (handles load/save of Personal MLPs).
+            clip_embeddings: Dict of article_id -> CLIP Tensor[512].
+            adaptation: TripletAdaptation instance (created with defaults if None).
+            trigger_every_n: Trigger adaptation every N interactions.
+            candidate_k: Recall pool size for recommendation.
+            final_k: Number of final recommendations.
+        """
+        self.lifecycle = lifecycle
+        self.clip_embeddings = clip_embeddings
+        self.adaptation = adaptation or TripletAdaptation()
+        self.trigger_every_n = trigger_every_n
+
+        self.recommender = Recommender(
+            clip_embeddings=clip_embeddings,
+            candidate_k=candidate_k,
+            final_k=final_k,
+        )
+
+    def get_recommendations(
+        self,
+        user_id: str,
+        seed_article_id: str,
+        k: int = 10,
+    ) -> List[str]:
+        """
+        Get top-k recommendations for a user.
+
+        If the user has interaction history (EMA vector exists), returns
+        personalized recommendations. Otherwise falls back to item-to-item KNN
+        from the seed article.
+
+        Args:
+            user_id: User identifier.
+            seed_article_id: Seed article (shown/clicked item).
+            k: Number of recommendations.
+
+        Returns:
+            List of article IDs (seed excluded).
+        """
+        entry = self.lifecycle.get_or_create(user_id)
+        ema = entry.user_state.get_vector()
+
+        # Request k+1 so we have enough after excluding the seed
+        extra = k + 1
+        old_final_k = self.recommender.final_k
+        self.recommender.final_k = extra
+
+        if ema is not None:
+            recs = self.recommender.recommend_personalized(
+                entry.user_state, entry.personal_mlp
+            )
+        else:
+            recs = self.recommender.recommend_cold(seed_article_id)
+
+        self.recommender.final_k = old_final_k
+
+        # Exclude seed then trim to k
+        recs = [r for r in recs if r != seed_article_id]
+        return recs[:k]
+
+    def handle_interaction(
+        self,
+        user_id: str,
+        article_id: str,
+        interaction_type: str = "purchase",
+        shown_articles: Optional[List[str]] = None,
+    ) -> dict:
+        """
+        Process a user interaction: update EMA, record history, trigger adaptation.
+
+        Args:
+            user_id: User identifier.
+            article_id: Interacted article.
+            interaction_type: "purchase", "click", or "view".
+            shown_articles: Articles shown alongside (used as negatives).
+
+        Returns:
+            Dict with status, interaction_count, adapted flag.
+        """
+        if article_id not in self.clip_embeddings:
+            return {"status": "skipped", "interaction_count": 0, "adapted": False}
+
+        entry = self.lifecycle.get_or_create(user_id)
+        clip_emb = self.clip_embeddings[article_id]
+
+        # Update EMA
+        with torch.no_grad():
+            mlp_proj = entry.personal_mlp(clip_emb.unsqueeze(0)).squeeze(0)
+        entry.user_state.update_ema(mlp_proj)
+
+        # Record raw interaction for triplet adaptation
+        entry.user_state.record_interaction(article_id, interaction_type, clip_emb)
+        entry.interaction_batch.append(article_id)
+
+        adapted = False
+        adaptation_time_ms = None
+        if len(entry.interaction_batch) >= self.trigger_every_n:
+            adapted, adaptation_time_ms = self._trigger_adaptation(entry, shown_articles)
+            self.lifecycle.mark_dirty(user_id)
+            self.lifecycle.flush(user_id)
+            entry.interaction_batch = []
+
+        return {
+            "status": "ok",
+            "interaction_count": entry.user_state.interaction_count,
+            "adapted": adapted,
+            "adaptation_time_ms": adaptation_time_ms,
+        }
+
+    def get_user_state(self, user_id: str) -> dict:
+        """
+        Return user state summary (for M3's /interact response).
+
+        Args:
+            user_id: User identifier.
+
+        Returns:
+            Dict with ema_vector (list), interaction_count, has_personalization.
+        """
+        entry = self.lifecycle.get_or_create(user_id)
+        ema = entry.user_state.get_vector()
+        return {
+            "user_id": user_id,
+            "ema_vector": ema.tolist() if ema is not None else None,
+            "interaction_count": entry.user_state.interaction_count,
+            "has_personalization": ema is not None,
+        }
+
+    def _trigger_adaptation(
+        self, entry, shown_articles: Optional[List[str]]
+    ) -> tuple:
+        """
+        Run triplet loss adaptation on the user's Personal MLP.
+
+        Returns:
+            (adapted: bool, adaptation_time_ms: Optional[float])
+        """
+        positives = [
+            self.clip_embeddings[aid]
+            for aid in entry.interaction_batch
+            if aid in self.clip_embeddings
+        ]
+        if not positives:
+            return False, None
+
+        # Negatives: shown but not interacted, else random
+        if shown_articles:
+            neg_ids = [
+                aid for aid in shown_articles
+                if aid not in entry.interaction_batch and aid in self.clip_embeddings
+            ]
+        else:
+            neg_ids = []
+
+        if not neg_ids:
+            all_ids = list(self.clip_embeddings.keys())
+            neg_ids = [
+                aid for aid in all_ids
+                if aid not in entry.interaction_batch
+            ][: len(positives)]
+
+        negatives = [self.clip_embeddings[aid] for aid in neg_ids]
+        if not negatives:
+            return False, None
+
+        _, adaptation_time_ms = self.adaptation.adapt(entry.personal_mlp, positives, negatives)
+        return True, adaptation_time_ms
