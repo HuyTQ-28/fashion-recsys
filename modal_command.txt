@@ -1,0 +1,18 @@
+# Create volume
+modal volume create my-volume
+
+# Put file or folder to modal
+modal volume put my-volume ./images /images
+
+# Check files in a folder
+modal volume ls my-volume /images
+
+# Get file from modal
+modal volume get my-volume /images/010/0108775044.jpg ./images/010/0108775044.jpg
+
+# Remove volume
+modal volume rm my-volume
+
+@app.function(volumes={"/fa_volume": modal.Volume.from_name("fa_volume")})                                          
+def some_func():                                                                                                 
+    os.listdir("/fa_volume") 
