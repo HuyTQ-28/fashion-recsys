@@ -47,16 +47,29 @@ def train_student_mlp(
     """
     mlp_config = config.get("student_mlp", config.get("hgnn", {}))
 
-    # Align article sets (only articles that have both CLIP and HGNN embeddings)
-    common_ids = sorted(set(clip_embeddings.keys()) & set(hgnn_embeddings.keys()))
-    logger.info(f"Training on {len(common_ids)} articles with both CLIP and HGNN embeddings")
 
-    if not common_ids:
-        raise ValueError("No common article IDs between CLIP and HGNN embeddings!")
+    id2idx = hgnn_embeddings["id2idx"]
+    hgnn_matrix = hgnn_embeddings["embeddings"]   # [N, 64]
 
-    # Prepare tensors
-    X = torch.stack([clip_embeddings[aid] for aid in common_ids]).to(device)  # [N, 512]
-    Y = torch.stack([hgnn_embeddings[aid] for aid in common_ids]).to(device)  # [N, 64]
+    common_ids = [aid for aid in clip_embeddings if aid in id2idx]
+
+    logger.info(f"Training on {len(common_ids)} items")
+
+    if len(common_ids) == 0:
+        raise ValueError("No overlap between CLIP and HGNN!")
+
+    # Build X, Y
+
+    X = torch.stack([
+        clip_embeddings[aid] for aid in common_ids
+    ])  # [N, 512]
+
+    Y = torch.stack([
+        hgnn_matrix[id2idx[aid]] for aid in common_ids
+    ])  # [N, 64]
+
+    X = X.to(device)
+    Y = Y.to(device)
 
     # Initialize model
     layers = mlp_config.get("layers", mlp_config.get("attribute_layers", [512, 256, 128, 64]))

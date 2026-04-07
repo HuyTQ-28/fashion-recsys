@@ -69,7 +69,6 @@ def ingest_products(
     logger.info(f"Ingested {count} articles into Product collection")
     return count
 
-
 def ingest_rec_embeddings(
     client: weaviate.WeaviateClient,
     mlp_embeddings: Dict[str, torch.Tensor],
