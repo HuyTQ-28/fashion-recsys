@@ -8,17 +8,21 @@ personal_mlp:
   activation: "relu"
 
   # EMA (Equation 5)
-  alpha: 0.5                    # search: {0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0}
+  # Sweep result: 0.7 best (local CPU, 200 users, fake_behavior.csv, CLIP 512-dim)
+  alpha: 0.7                    # search: {0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0}
 
   # Triplet Loss Adaptation (Equations 6-7)
-  sgd_steps: 5                  # search: {1, 2, 3, 4, 5, 10, 20, 35, 50, 65, 80}
+  # Sweep result: sgd_steps=1 (more steps → overfit), margin=inf (random negatives → noise)
+  sgd_steps: 1                  # search: {1, 2, 3, 4, 5, 10, 20, 35, 50, 65, 80}
   learning_rate: 1.0e-4         # search: {1e-2, 1e-3, 1e-4, 1e-5, 1e-6}
   weight_decay: 1.0e-6          # search: {1e-5, 1e-6, 1e-7, 0}
-  margin: 100                   # search: {1, 100, inf}
-  adaptation_batch_size: 5      # search: {1, 2, 3, 5, 7, 9}
-  trigger_every_n_interactions: 5
+  margin: .inf                  # search: {1, 100, inf}
+  # Sweep result: batch_size=1 best F1 (+0.25 vs 9), reflects true online 1-at-a-time adaptation
+  adaptation_batch_size: 1      # search: {1, 2, 3, 5, 7, 9}
+  trigger_every_n_interactions: 1
 
   # MLP Lifecycle
+  # lifespan_days: no effect on fake_behavior (10-day range) — keep 14 as paper default
   lru_cache_max_size: 200
   redis_ttl_days: 14
   flush_strategy: "eager"       # {eager, lazy}

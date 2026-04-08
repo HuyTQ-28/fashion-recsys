@@ -280,14 +280,13 @@ SWEEP_CONFIGS = {
     "lifespan_days": [1, 7, 14, 21],
 }
 
-# Best values from sensitivity sweep (Colab, 200 users, fake_behavior.csv + HGNN 64-dim)
-# alpha=0.7 (+0.80 F1), sgd_steps=1 (+1.21), margin=inf (+1.80), batch_size=9 (+0.96)
-# lifespan_days has no effect on fake data → keep 14 as neutral default
+# Best values from sensitivity sweep (local CPU, 200 users, fake_behavior.csv, CLIP 512-dim)
+# Source of truth: configs/personalization.yaml
 FIXED_DEFAULTS = {
-    "alpha": 0.7,
-    "sgd_steps": 1,
-    "margin": float("inf"),
-    "batch_size": 9,
+    "alpha":         0.7,
+    "sgd_steps":     1,
+    "margin":        float("inf"),
+    "batch_size":    1,
     "lifespan_days": 14,
 }
 
