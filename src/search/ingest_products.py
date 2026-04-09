@@ -1,13 +1,3 @@
-"""
-Product Ingestion into Weaviate Collections.
-
-Owner: Member 3 (Search & Infrastructure)
-
-Two ingestion scripts:
-1. ingest_products: CLIP embeddings + metadata -> Product collection
-2. ingest_rec_embeddings: Student MLP 64-dim -> ProductRec collection
-"""
-
 import logging
 from typing import Dict
 
@@ -57,8 +47,8 @@ def ingest_products(
                         props[col] = str(row[col])
 
                 # Image path
-                prefix = f"0{str(article_id)[:2]}"
-                props["image_path"] = f"images/{prefix}/0{article_id}.jpg"
+                prefix = f"{str(article_id)[:3]}"
+                props["image_path"] = f"images/{prefix}/{article_id}.jpg"
 
             batch.add_object(
                 properties=props,
@@ -90,8 +80,13 @@ def ingest_rec_embeddings(
 
     with collection.batch.dynamic() as batch:
         for article_id, embedding in mlp_embeddings.items():
+            props = {"article_id": str(article_id)}
+            
+            # Image path
+            prefix = f"{str(article_id)[:3]}"
+            props["image_path"] = f"images/{prefix}/{article_id}.jpg"
             batch.add_object(
-                properties={"article_id": str(article_id)},
+                properties=props,
                 vector=embedding.tolist(),
             )
             count += 1

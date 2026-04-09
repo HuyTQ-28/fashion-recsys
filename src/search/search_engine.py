@@ -1,8 +1,6 @@
 """
 Hybrid Search Engine backed by Weaviate.
 
-Owner: Member 3 (Search & Infrastructure)
-
 Three search modes:
 1. Semantic (pure vector): CLIP text/image embedding -> near_vector
 2. Keyword (pure BM25): BM25 on product_name and detail_desc
