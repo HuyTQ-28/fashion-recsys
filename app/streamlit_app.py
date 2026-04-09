@@ -7,6 +7,7 @@ import csv
 import hashlib
 import random
 import sys
+import requests
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -17,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.api_client import APIClientError, build_api_client
+# Removed old api_client imports and replaced with direct HTTP calls
 from app.config import SidebarSettings
 from app.state import init_session_state, reset_runtime_state
 from app.style import inject_global_styles
@@ -79,7 +80,7 @@ def _resolve_image_path(images_root: Path, fallback_image_path: str, article_id:
 
 @st.cache_data(show_spinner=False)
 def _load_article_lookup() -> Dict[str, Dict]:
-    data_root = PROJECT_ROOT / "data"
+    data_root = PROJECT_ROOT / "dataset" / "subset_1week"
     articles_csv = data_root / "articles.csv"
     images_root = data_root / "images"
 
@@ -134,7 +135,8 @@ def _coalesce_price(*values: Optional[object]) -> Optional[float]:
 
 
 def _coalesce_image_path(payload: Dict, base: Dict) -> str:
-    for source in (payload, base):
+    # Prefer base (which contains absolute local path) over payload (which contains relative weaviate path)
+    for source in (base, payload):
         for key in ("image_path", "image_url"):
             value = source.get(key)
             if isinstance(value, str) and value.strip():
@@ -197,25 +199,6 @@ def _hydrate_item(item: Dict, article_lookup: Dict[str, Dict]) -> Dict:
     return payload
 
 
-def _client_signature(settings: SidebarSettings) -> str:
-    mode = "stub" if settings.use_stub else "api"
-    return f"{mode}:{settings.api_base_url}"
-
-
-def _get_api_client(settings: SidebarSettings):
-    signature = _client_signature(settings)
-    if (
-        st.session_state.get("api_client") is None
-        or st.session_state.get("client_signature") != signature
-    ):
-        st.session_state.api_client = build_api_client(
-            use_stub=settings.use_stub,
-            api_base_url=settings.api_base_url,
-        )
-        st.session_state.client_signature = signature
-    return st.session_state.api_client
-
-
 def _encode_image(image_bytes):
     if not image_bytes:
         return None
@@ -237,23 +220,72 @@ def _normalize_recommendations(items: List[Dict]) -> List[Dict]:
         normalized.append(_hydrate_item(item, article_lookup))
     return normalized
 
+# --- Modal API Direct Integration ---
 
-def _refresh_user_state(api_client, user_id: str) -> None:
-    state = api_client.user_state(user_id=user_id)
-    st.session_state.user_state = state
-    st.session_state.interaction_count = int(state.get("interaction_count", 0))
+def modal_api_call(endpoint: str, payload: dict, settings: SidebarSettings) -> dict:
+    base_url = settings.api_base_url.strip("/")
+    ep = endpoint.strip("/")
+    if ".modal.run" in base_url:
+        modal_suffix = f"-{ep.replace('_', '-')}.modal.run"
+        url = base_url.replace(".modal.run", modal_suffix)
+    else:
+        url = f"{base_url}/{ep}"
+        
+    # Use the mock stub if enabled in settings
+    if settings.use_stub:
+        from app.api_client import build_api_client
+        stub_client = build_api_client(use_stub=True, api_base_url=settings.api_base_url)
+        return getattr(stub_client, ep.replace("-", "_"))(**payload)
+
+    try:
+        response = requests.post(url, json=payload, timeout=20.0)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"Modal API Error at {endpoint}: {e}")
+
+def modal_api_get(endpoint: str, params: dict, settings: SidebarSettings) -> dict:
+    base_url = settings.api_base_url.strip("/")
+    ep = endpoint.strip("/")
+    if ".modal.run" in base_url:
+        modal_suffix = f"-{ep.replace('_', '-')}.modal.run"
+        url = base_url.replace(".modal.run", modal_suffix)
+    else:
+        url = f"{base_url}/{ep}"
+        
+    if settings.use_stub:
+        from app.api_client import build_api_client
+        stub_client = build_api_client(use_stub=True, api_base_url=settings.api_base_url)
+        return getattr(stub_client, ep.replace("-", "_"))(**params)
+        
+    try:
+        response = requests.get(url, params=params, timeout=10.0)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"Modal API Error at {endpoint}: {e}")
 
 
-def _run_search(api_client, settings: SidebarSettings, query: str, image_bytes) -> None:
-    response = api_client.search(
-        query=query or None,
-        image_b64=_encode_image(image_bytes),
-        filters=settings.filters,
-        user_id=settings.user_id,
-        alpha=settings.alpha,
-        mode=settings.search_mode,
-        limit=settings.search_limit,
-    )
+def _refresh_user_state(settings: SidebarSettings) -> None:
+    with st.spinner("Fetching user state..."):
+        state = modal_api_get("/user_state", {"user_id": settings.user_id}, settings)
+        st.session_state.user_state = state
+        st.session_state.interaction_count = int(state.get("interaction_count", 0))
+
+
+def _run_search(settings: SidebarSettings, query: str, image_bytes) -> None:
+    payload = {
+        "query": query or None,
+        "image_b64": _encode_image(image_bytes),
+        "filters": settings.filters,
+        "user_id": settings.user_id,
+        "alpha": settings.alpha,
+        "mode": settings.search_mode,
+        "limit": settings.search_limit,
+    }
+    with st.spinner("Searching Weaviate via Modal..."):
+        response = modal_api_call("/search", payload, settings)
+        
     results = _normalize_search_results(response.get("results", []))
     st.session_state.search_results = results
     st.session_state.search_feedback = (
@@ -262,24 +294,34 @@ def _run_search(api_client, settings: SidebarSettings, query: str, image_bytes) 
     )
 
 
-def _run_recommend(api_client, settings: SidebarSettings, article_id: str) -> None:
-    response = api_client.recommend(
-        article_id=article_id,
-        user_id=settings.user_id,
-        k=settings.recommend_k,
-    )
+def _run_recommend(settings: SidebarSettings, article_id: str) -> None:
+    payload = {
+        "article_id": article_id,
+        "user_id": settings.user_id,
+        "k": settings.recommend_k,
+    }
+    with st.spinner("Generating personalized recommendations..."):
+        response = modal_api_call("/recommend", payload, settings)
+        
     st.session_state.recommendations = _normalize_recommendations(
         response.get("recommendations", [])
     )
 
 
-def _run_before_after(api_client, settings: SidebarSettings, article_id: str) -> None:
-    generic = api_client.recommend(article_id=article_id, user_id=None, k=settings.recommend_k)
-    personalized = api_client.recommend(
-        article_id=article_id,
-        user_id=settings.user_id,
-        k=settings.recommend_k,
-    )
+def _run_before_after(settings: SidebarSettings, article_id: str) -> None:
+    with st.spinner("Preparing personalization comparison..."):
+        generic = modal_api_call("/recommend", {
+            "article_id": article_id,
+            "user_id": None,
+            "k": settings.recommend_k,
+        }, settings)
+        
+        personalized = modal_api_call("/recommend", {
+            "article_id": article_id,
+            "user_id": settings.user_id,
+            "k": settings.recommend_k,
+        }, settings)
+        
     st.session_state.comparison = {
         "generic": _normalize_recommendations(generic.get("recommendations", [])),
         "personalized": _normalize_recommendations(
@@ -288,15 +330,18 @@ def _run_before_after(api_client, settings: SidebarSettings, article_id: str) ->
     }
 
 
-def _run_interaction(api_client, settings: SidebarSettings, article_id: str) -> None:
+def _run_interaction(settings: SidebarSettings, article_id: str) -> None:
     shown_articles = [
         str(item.get("article_id")) for item in st.session_state.get("search_results", [])
     ]
-    response = api_client.interact(
-        user_id=settings.user_id,
-        article_id=article_id,
-        shown_articles=shown_articles,
-    )
+    payload = {
+        "user_id": settings.user_id,
+        "article_id": article_id,
+        "shown_articles": shown_articles,
+    }
+    
+    with st.spinner("Logging interaction & adapting user preferences..."):
+        response = modal_api_call("/interact", payload, settings)
 
     st.session_state.last_interaction = response
     st.session_state.interaction_count = int(response.get("interaction_count", 0))
@@ -309,8 +354,8 @@ def _run_interaction(api_client, settings: SidebarSettings, article_id: str) -> 
     )
     st.session_state.interaction_history = st.session_state.interaction_history[-30:]
 
-    _refresh_user_state(api_client, settings.user_id)
-    _run_recommend(api_client, settings, article_id)
+    _refresh_user_state(settings)
+    _run_recommend(settings, article_id)
 
 
 def main() -> None:
@@ -325,18 +370,25 @@ def main() -> None:
         reset_runtime_state()
         st.rerun()
 
-    api_client = _get_api_client(settings)
     try:
-        _refresh_user_state(api_client, settings.user_id)
-    except APIClientError as exc:
+        _refresh_user_state(settings)
+    except RuntimeError as exc:
         st.warning(f"User state endpoint unavailable: {exc}")
 
     query, image_bytes, submitted = render_search_form()
 
+    # Automatically trigger a default search on the very first page load
+    if not st.session_state.has_run_initial_search:
+        st.session_state.has_run_initial_search = True
+        try:
+            _run_search(settings, "", None)
+        except RuntimeError as exc:
+            st.error(f"Initial load failed: {exc}")
+
     if submitted:
         try:
-            _run_search(api_client, settings, query, image_bytes)
-        except APIClientError as exc:
+            _run_search(settings, query, image_bytes)
+        except RuntimeError as exc:
             st.error(f"Search request failed: {exc}")
 
     render_feedback(st.session_state.get("search_feedback", ""))
@@ -347,10 +399,10 @@ def main() -> None:
         if selected is not None:
             st.session_state.selected_product = selected
             try:
-                _run_recommend(api_client, settings, str(selected.get("article_id")))
+                _run_recommend(settings, str(selected.get("article_id")))
                 if settings.show_before_after:
-                    _run_before_after(api_client, settings, str(selected.get("article_id")))
-            except APIClientError as exc:
+                    _run_before_after(settings, str(selected.get("article_id")))
+            except RuntimeError as exc:
                 st.error(f"Recommendation request failed: {exc}")
 
     selected_product = st.session_state.get("selected_product")
@@ -363,28 +415,25 @@ def main() -> None:
             if st.button("Record interaction", use_container_width=True):
                 try:
                     _run_interaction(
-                        api_client,
                         settings,
                         article_id=str(selected_product.get("article_id")),
                     )
-                except APIClientError as exc:
+                except RuntimeError as exc:
                     st.error(f"Interaction request failed: {exc}")
 
         with action_col2:
             if st.button("Refresh recommendations", use_container_width=True):
                 try:
                     _run_recommend(
-                        api_client,
                         settings,
                         article_id=str(selected_product.get("article_id")),
                     )
                     if settings.show_before_after:
                         _run_before_after(
-                            api_client,
                             settings,
                             article_id=str(selected_product.get("article_id")),
                         )
-                except APIClientError as exc:
+                except RuntimeError as exc:
                     st.error(f"Refresh failed: {exc}")
 
         clicked_rec = render_recommendations(
@@ -399,10 +448,10 @@ def main() -> None:
                 **clicked_rec,
             }
             try:
-                _run_recommend(api_client, settings, str(clicked_rec.get("article_id")))
+                _run_recommend(settings, str(clicked_rec.get("article_id")))
                 if settings.show_before_after:
-                    _run_before_after(api_client, settings, str(clicked_rec.get("article_id")))
-            except APIClientError as exc:
+                    _run_before_after(settings, str(clicked_rec.get("article_id")))
+            except RuntimeError as exc:
                 st.error(f"Could not load recommendation seed: {exc}")
 
     if settings.show_before_after and selected_product:

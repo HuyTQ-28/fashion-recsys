@@ -65,7 +65,7 @@ def create_product_collection(client: weaviate.WeaviateClient, delete_existing: 
         ),
         properties=[
             Property(name="article_id", data_type=DataType.TEXT, tokenization=Tokenization.FIELD),
-            Property(name="product_name", data_type=DataType.TEXT, tokenization=Tokenization.WORD),
+            Property(name="prod_name", data_type=DataType.TEXT, tokenization=Tokenization.WORD),
             Property(name="product_type_name", data_type=DataType.TEXT, tokenization=Tokenization.FIELD),
             Property(name="product_group_name", data_type=DataType.TEXT, tokenization=Tokenization.FIELD),
             Property(name="colour_group_name", data_type=DataType.TEXT, tokenization=Tokenization.FIELD),
@@ -73,7 +73,7 @@ def create_product_collection(client: weaviate.WeaviateClient, delete_existing: 
             Property(name="index_group_name", data_type=DataType.TEXT, tokenization=Tokenization.FIELD),
             Property(name="garment_group_name", data_type=DataType.TEXT, tokenization=Tokenization.FIELD),
             Property(name="detail_desc", data_type=DataType.TEXT, tokenization=Tokenization.WORD),
-            Property(name="image_path", data_type=DataType.TEXT),
+            Property(name="image_path", data_type=DataType.TEXT), 
         ],
     )
     logger.info(f"Created collection: {collection_name}")
@@ -101,7 +101,7 @@ def create_product_rec_collection(client: weaviate.WeaviateClient, delete_existi
         name=collection_name,
         vectorizer_config=Configure.Vectorizer.none(),
         vector_index_config=Configure.VectorIndex.hnsw(
-            distance_metric=weaviate.classes.config.VectorDistances.L2,
+            distance_metric=weaviate.classes.config.VectorDistances.L2_SQUARED,
         ),
         properties=[
             Property(name="article_id", data_type=DataType.TEXT, tokenization=Tokenization.FIELD),
@@ -116,3 +116,21 @@ def setup_all_collections(client: weaviate.WeaviateClient, delete_existing: bool
     create_product_collection(client, delete_existing)
     create_product_rec_collection(client, delete_existing)
     logger.info("All collections created successfully")
+
+if __name__ == "__main__":
+    import os
+    from dotenv import load_dotenv
+    
+    logging.basicConfig(level=logging.INFO)
+    load_dotenv()
+    
+    url = os.environ.get("WEAVIATE_URL")
+    api_key = os.environ.get("WEAVIATE_API_KEY")
+    
+    if not url or not api_key:
+        logger.error("Error: WEAVIATE_URL and WEAVIATE_API_KEY must be in your .env")
+        exit(1)
+        
+    client = get_weaviate_client(url, api_key)
+    setup_all_collections(client, delete_existing=True)
+    client.close()

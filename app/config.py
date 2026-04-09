@@ -1,9 +1,13 @@
 """Configuration values used by the Streamlit frontend."""
 
+import os
 from dataclasses import dataclass
 from typing import Dict
 
-DEFAULT_API_BASE_URL = "http://localhost:8000"
+# Modal deployed URL should be provided via environment variable; 
+# fallback to a placeholder or localhost for testing.
+DEFAULT_API_BASE_URL = os.environ.get("MODAL_API_BASE_URL", "https://huytq2810--fashion-recsys.modal.run")
+USE_STUB_API = os.environ.get("USE_STUB_API", "false").lower() == "true"
 DEFAULT_USER_ID = "demo_user"
 
 SEARCH_MODES = ("hybrid", "semantic", "keyword")

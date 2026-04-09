@@ -18,6 +18,7 @@ DEFAULT_STATE: Dict[str, Any] = {
     "search_feedback": "",
     "client_signature": "",
     "api_client": None,
+    "has_run_initial_search": False,
 }
 
 
@@ -33,6 +34,7 @@ RUNTIME_KEYS = [
     "search_feedback",
     "api_client",
     "client_signature",
+    "has_run_initial_search",
 ]
 
 

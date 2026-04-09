@@ -13,7 +13,7 @@ from typing import Dict, List, Optional
 import weaviate
 from weaviate.classes.query import Filter, MetadataQuery
 
-from src.search.clip_encoder import CLIPEncoder
+from src.extractor.clip_encoder import CLIPEncoder
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +61,13 @@ class HybridSearchEngine:
         """
         # Build Weaviate filter
         weaviate_filter = self._build_filter(filters) if filters else None
+
+        if not query and not image:
+            response = self.collection.query.fetch_objects(
+                filters=weaviate_filter,
+                limit=limit,
+            )
+            return self._format_results(response.objects)
 
         if mode == "keyword" and query:
             return self._bm25_search(query, weaviate_filter, limit)

@@ -1,14 +1,3 @@
-"""
-MLP Lifecycle Manager with Pluggable Storage Backends.
-
-Owner: Member 2 (Personalization Engine)
-Redis Backend: Member 3 (Search & Infrastructure)
-
-Manages Personal MLP weights with a two-tier caching strategy:
-- Hot tier: LRU in-memory cache (per-container, ~200 users, ~140MB)
-- Cold tier: Pluggable StorageBackend (Redis for prod, LocalDict for test)
-"""
-
 import logging
 import time
 from collections import OrderedDict
@@ -21,10 +10,6 @@ from src.inference.user_state import UserState
 
 logger = logging.getLogger(__name__)
 
-
-# ============================================================
-# Storage Backend Interface (M2 defines, M3 implements Redis)
-# ============================================================
 
 class StorageBackend(Protocol):
     """Protocol for pluggable MLP storage backends."""
@@ -92,10 +77,6 @@ class LocalDictBackend:
         self._ttls.clear()
 
 
-# ============================================================
-# LRU Cache (standalone — used directly in tests)
-# ============================================================
-
 class LRUCache:
     """
     Standalone LRU cache with fixed max size.
@@ -146,10 +127,6 @@ class LRUCache:
         return self._cache.pop(key, None)
 
 
-# ============================================================
-# Cache Entry
-# ============================================================
-
 class CacheEntry:
     """A single entry in the LRU cache."""
 
@@ -160,10 +137,6 @@ class CacheEntry:
         self.dirty = False
         self.last_accessed = time.time()
 
-
-# ============================================================
-# Internal: template-based factory (back-compat)
-# ============================================================
 
 class _TemplateFactory:
     """Wraps a PersonalMLP/StudentMLP as a factory by deep-copying it."""
@@ -187,10 +160,6 @@ class _TemplateFactory:
         return PersonalMLP(base_model=self._template, user_id=user_id, layer_dims=self.layer_dims)
 
 
-# ============================================================
-# MLP Lifecycle Manager
-# ============================================================
-
 class MLPLifecycleManager:
     """
     Manages Personal MLP lifecycle with LRU cache + storage backend.
@@ -204,12 +173,11 @@ class MLPLifecycleManager:
 
     def __init__(
         self,
-        factory,  # PersonalMLPFactory OR PersonalMLP (template, for back-compat)
+        factory,
         backend: StorageBackend,
         max_size: int = 200,
         ttl_seconds: int = 14 * 24 * 3600,  # 14 days
         alpha: float = 0.7,  # best from sensitivity sweep
-        # legacy kwarg aliases
         student_mlp=None,
         layer_dims=None,
     ):

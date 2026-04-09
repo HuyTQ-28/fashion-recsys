@@ -4,21 +4,22 @@ app = modal.App("mlp-distill")
 
 image = (
     modal.Image.debian_slim()
-    .pip_install("torch", "numpy")
-    .add_local_dir(".", remote_path="/app")
+    .pip_install("torch", "numpy<2.0.0")
+    .add_local_dir("src", remote_path="/root", ignore=["venv", "__pycache__", ".git"])
 )
 
-volume = modal.Volume.from_name("recsys-data", create_if_missing=True)
+volume = modal.Volume.from_name("checkpoints", create_if_missing=True)
 
 
 @app.function(
     image=image,
     gpu="T4",
-    volumes={"/data": volume}
+    volumes={"/checkpoints": volume},
+    timeout=60*60*2
 )
 def train_model():
     import sys
-    sys.path.append("/app")
+    sys.path.append("/root")
 
     import torch
     from torch.utils.data import DataLoader
@@ -27,9 +28,9 @@ def train_model():
     from MLP_student.build_dataset import DistillDataset
     from MLP_student.train import train_student
 
-    # Load data
-    data = torch.load("/data/article_embeddings_hgnn3.pt")
-    clip_dict = torch.load("/data/clip_embeddings.pt")
+    # Load data from the unified checkpoints volume
+    data = torch.load("/checkpoints/article_embeddings_hgnn3.pt", weights_only=True)
+    clip_dict = torch.load("/checkpoints/clip_embeddings.pt", weights_only=True)
 
     id2idx = data["id2idx"]
     hgnn_embeddings = data["embeddings"]
@@ -57,6 +58,10 @@ def train_model():
         use_wandb=False
     )
 
-    # Save model
-    torch.save(trained_model.state_dict(), "/data/mlp_student.pt")
-    print("Saved trained MLP model to /data/mlp_student.pt")
+    # Save model exactly where app.py expects it for deployment
+    torch.save(trained_model.state_dict(), "/checkpoints/student_mlp_full.pt")
+    print("Saved trained MLP model to /checkpoints/student_mlp_full.pt")
+
+@app.local_entrypoint()
+def main():
+    train_model.remote()

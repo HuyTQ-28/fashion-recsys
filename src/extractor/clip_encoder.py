@@ -31,6 +31,8 @@ class CLIPEncoder:
         """
         inputs = self.processor(text=query, return_tensors="pt").to(self.device)
         embedding = self.model.get_text_features(**inputs)
+        if not isinstance(embedding, torch.Tensor):
+            embedding = embedding.pooler_output
         embedding = F.normalize(embedding, p=2, dim=-1)
         return embedding.cpu()
 
@@ -47,5 +49,7 @@ class CLIPEncoder:
         """
         inputs = self.processor(images=image, return_tensors="pt").to(self.device)
         embedding = self.model.get_image_features(**inputs)
+        if not isinstance(embedding, torch.Tensor):
+            embedding = embedding.pooler_output
         embedding = F.normalize(embedding, p=2, dim=-1)
         return embedding.squeeze(0).cpu()
