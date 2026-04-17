@@ -1,16 +1,10 @@
-"""
-Hybrid Search Engine backed by Weaviate.
-
-Three search modes:
-1. Semantic (pure vector): CLIP text/image embedding -> near_vector
-2. Keyword (pure BM25): BM25 on product_name and detail_desc
-3. Hybrid (blended): Weaviate native hybrid = vector + BM25, tunable alpha
-"""
-
 import logging
+import os
 from typing import Dict, List, Optional
 
+import requests as http_requests
 import weaviate
+from weaviate.exceptions import WeaviateQueryError
 from weaviate.classes.query import Filter, MetadataQuery
 
 from src.extractor.clip_encoder import CLIPEncoder
@@ -35,6 +29,10 @@ class HybridSearchEngine:
         self.client = client
         self.clip_encoder = clip_encoder
         self.collection = client.collections.get("Product")
+        # Cache env vars once for REST fallback
+        raw_url = os.environ.get("WEAVIATE_URL", "")
+        self._rest_base = raw_url if raw_url.startswith("http") else f"https://{raw_url}"
+        self._rest_api_key = os.environ.get("WEAVIATE_API_KEY", "")
 
     def search(
         self,
@@ -63,11 +61,7 @@ class HybridSearchEngine:
         weaviate_filter = self._build_filter(filters) if filters else None
 
         if not query and not image:
-            response = self.collection.query.fetch_objects(
-                filters=weaviate_filter,
-                limit=limit,
-            )
-            return self._format_results(response.objects)
+            return self._safe_fetch_objects(weaviate_filter, limit)
 
         if mode == "keyword" and query:
             return self._bm25_search(query, weaviate_filter, limit)
@@ -108,35 +102,87 @@ class HybridSearchEngine:
 
     def _vector_search(self, vector, weaviate_filter, limit) -> List[dict]:
         """Pure vector (semantic) search."""
-        response = self.collection.query.near_vector(
-            near_vector=vector,
-            filters=weaviate_filter,
-            limit=limit,
-            return_metadata=MetadataQuery(distance=True),
-        )
-        return self._format_results(response.objects)
+        try:
+            response = self.collection.query.near_vector(
+                near_vector=vector,
+                filters=weaviate_filter,
+                limit=limit,
+                return_metadata=MetadataQuery(distance=True),
+            )
+            return self._format_results(response.objects)
+        except WeaviateQueryError as exc:
+            logger.warning("Vector search unavailable (gRPC): %s — falling back to REST.", exc)
+            return self._safe_fetch_objects(weaviate_filter, limit)
 
     def _bm25_search(self, query, weaviate_filter, limit) -> List[dict]:
         """Pure BM25 keyword search."""
-        response = self.collection.query.bm25(
-            query=query,
-            filters=weaviate_filter,
-            limit=limit,
-            return_metadata=MetadataQuery(score=True),
-        )
-        return self._format_results(response.objects)
+        try:
+            response = self.collection.query.bm25(
+                query=query,
+                filters=weaviate_filter,
+                limit=limit,
+                return_metadata=MetadataQuery(score=True),
+            )
+            return self._format_results(response.objects)
+        except WeaviateQueryError as exc:
+            logger.warning("BM25 search unavailable (gRPC): %s — falling back to REST.", exc)
+            return self._safe_fetch_objects(weaviate_filter, limit)
 
     def _hybrid_search(self, query, vector, alpha, weaviate_filter, limit) -> List[dict]:
         """Hybrid search (BM25 + vector blend)."""
-        response = self.collection.query.hybrid(
-            query=query,
-            vector=vector,
-            alpha=alpha,
-            filters=weaviate_filter,
-            limit=limit,
-            return_metadata=MetadataQuery(score=True),
-        )
-        return self._format_results(response.objects)
+        try:
+            response = self.collection.query.hybrid(
+                query=query,
+                vector=vector,
+                alpha=alpha,
+                filters=weaviate_filter,
+                limit=limit,
+                return_metadata=MetadataQuery(score=True),
+            )
+            return self._format_results(response.objects)
+        except WeaviateQueryError as exc:
+            logger.warning("Hybrid search unavailable (gRPC): %s — falling back to REST.", exc)
+            return self._safe_fetch_objects(weaviate_filter, limit)
+
+    def _safe_fetch_objects(self, weaviate_filter, limit: int) -> List[dict]:
+        """
+        Try gRPC fetch_objects first; if it fails (Deadline Exceeded on WSL2),
+        fall back to Weaviate's plain REST /v1/objects endpoint which bypasses gRPC entirely.
+        """
+        try:
+            response = self.collection.query.fetch_objects(
+                filters=weaviate_filter,
+                limit=limit,
+            )
+            return self._format_results(response.objects)
+        except Exception as exc:
+            logger.warning("gRPC fetch_objects failed: %s — switching to REST fallback.", exc)
+            return self._rest_fetch_objects(limit)
+
+    def _rest_fetch_objects(self, limit: int = 20) -> List[dict]:
+        """
+        Fetch objects via Weaviate REST API, completely bypassing gRPC.
+        Used as the last-resort fallback when the gRPC channel is blocked (e.g. WSL2).
+        """
+        url = f"{self._rest_base}/v1/objects?class=Product&limit={limit}"
+        headers = {
+            "Authorization": f"Bearer {self._rest_api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            resp = http_requests.get(url, headers=headers, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            results = []
+            for obj in data.get("objects", []):
+                props = dict(obj.get("properties", {}))
+                props.setdefault("score", 0.0)
+                results.append(props)
+            logger.info("REST fallback returned %d objects.", len(results))
+            return results
+        except Exception as rest_exc:
+            logger.error("REST fallback also failed: %s", rest_exc)
+            return []
 
     def _format_results(self, objects) -> List[dict]:
         """Format Weaviate response objects into result dicts."""

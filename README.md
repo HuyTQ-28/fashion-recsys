@@ -1,162 +1,153 @@
-# Real-Time Personalized Fashion Recommender System
+# Real-time Fashion Recommender System
 
-> **Paper:** "Real-time and personalized product recommendations for e-commerce through knowledge-distilled heterogeneous graph models with continual adaptation" — Tolloso et al. (2025)  
-> **Dataset:** [H&M Personalized Fashion Recommendations](https://www.kaggle.com/competitions/h-and-m-personalized-fashion-recommendations/) (Kaggle)
+## Kiến trúc hệ thống
 
----
+### 1. Lớp Giao diện (Frontend / Presentation Layer)
+Đảm nhiệm vai trò tương tác trực tiếp với người dùng, yêu cầu tốc độ phản hồi UI mượt mà và quản lý trạng thái phiên làm việc (session).
 
-## 1. Mục tiêu dự án
+- Công nghệ: Next.js (App Router, React) + Tailwind CSS.
 
-Xây dựng hệ thống gợi ý thời trang **thời gian thực** dựa trên kiến trúc Knowledge Distillation từ paper:
+- Môi trường chạy: Localhost (Cổng 3000).
 
-1. **HGNN Teacher** — Mã hóa quan hệ đồng mua (co-purchase) giữa sản phẩm thông qua Heterogeneous Graph Neural Network.
-2. **Student MLP** — Mô hình nhẹ học chưng cất (distillation) từ HGNN, chỉ cần ảnh sản phẩm làm đầu vào.
-3. **Personal MLP** — Bản sao Student MLP cho mỗi user, liên tục được fine-tune bằng Triplet Loss dựa trên tương tác thực.
+- Nhiệm vụ cốt lõi:
 
----
++ Giao diện: Render danh sách sản phẩm dạng Grid và khu vực "Gợi ý cá nhân hóa" (Sidebar/Panel) với các bộ lọc (Filters) động.
 
-## 2. Ràng buộc & Giới hạn Dữ liệu
++ Client-side State Management: Tự động tạo và quản lý session_id (UUID) lưu trong Local Storage cho mỗi người dùng nặc danh.
 
-### ⚠️ Giới hạn quan trọng của Dataset H&M
++ Event-driven Updates: Bắt các sự kiện tìm kiếm (Search/Filter) và tương tác (Click) để gọi API Backend, đồng thời cập nhật UI tức thời (sử dụng Skeleton Loading trong lúc chờ API).
 
-Paper gốc sử dụng **4 loại tương tác** (co-clicked, co-favorite, co-cart, co-purchased) từ dữ liệu nội bộ, cho phép xây dựng đồ thị heterogeneous đa cạnh với trọng số γ = [1.0, 0.5, 0.5, 0.1].
+### 2. Lớp Máy chủ Xử lý (Backend / API Layer)
+Đóng vai trò là "Bộ não" của hệ thống, xử lý toàn bộ logic tìm kiếm, cập nhật mô hình AI và gợi ý cá nhân hóa.
 
-**Dataset H&M công khai chỉ có `transactions` (mua hàng)**, không có click/favorite/add-to-cart. Điều này dẫn đến:
+- Công nghệ: Python + FastAPI + PyTorch.
 
-| Khía cạnh | Paper gốc (E-commerce dataset) | Triển khai H&M (Public dataset) |
-|---|---|---|
-| Loại tương tác | 4 loại (click, fav, cart, purchase) | 1 loại (purchase only) |
-| Số loại cạnh | 4 (heterogeneous) | 1 (homogeneous) hoặc tạo synthetic edges |
-| Negative samples | Items hiển thị nhưng không click | Random negatives (không có implicit feedback) |
-| Hiệu quả cá nhân hóa | F1 cải thiện +77.7% vs LightGCN | F1 cải thiện +8.4% vs best public (khiêm tốn hơn) |
+- Môi trường chạy: Máy tính cá nhân (Localhost, Cổng 8000).
 
-**Giải pháp:** Tạo **synthetic multi-relation edges** từ tần suất mua (light/medium/heavy co-purchase) để giả lập đa cạnh.
+- Kiến trúc In-Memory (RAM Cache): Khi khởi động (startup event), Backend tự động nạp các model (FashionCLIP text-encoder) và Dictionary chứa vector embedding/metadata vào RAM để đảm bảo tính toán ở độ trễ < 20ms.
 
-### Ràng buộc kỹ thuật
+- Các luồng API chính:
 
-- **Kiến trúc Serverless & Stateless:** Container inference trên Modal không giữ trạng thái. State nằm ở **Weaviate** (Vector + Metadata) và **Upstash Redis** (Personal MLP weights).
-- **Latency Target:** Recommendation ≤ 50ms (bao gồm Weaviate retrieval + MLP re-rank). MLP adaptation ≤ 150ms trên CPU.
-- **Bộ nhớ:** Personal MLP ~700KB/user, lưu trên Redis. LRU Cache (max 200 user) trên container RAM. TTL = 14 ngày (paper cho thấy hiệu suất giảm sau 2-3 tuần).
-- **CNN Encoder:** Dùng **FashionCLIP** (512-dim) thay vì ResNet-18 (paper), cho phép cross-modal text/image search.
++ GET /search: Nhận query (text) và filters. Trích xuất vector 512-dim qua FashionCLIP và gọi Weaviate để thực hiện Hybrid Search (Vector + BM25). Trả về danh sách sản phẩm hiển thị.
 
----
++ POST /interact: Nhận session_id và article_id (sản phẩm user vừa click). Đẩy task chạy ngầm (Background Task) để: Cập nhật lịch sử click vào Redis, lấy mô hình Personal MLP của user từ Redis (hoặc tạo mới từ Base MLP), fine-tune model bằng thuật toán SGD (Triplet Loss), lưu đè model đã cập nhật lên Redis.
 
-## 3. Kiến trúc hệ thống
++ GET /recommend: Truy xuất Weaviate (Stage 1 - Candidate Retrieval) để lấy Top 100 ứng viên dựa trên vector EMA của user. Sau đó chiếu 100 ứng viên này qua mô hình Personal MLP hiện tại (Stage 2 - Re-ranking) và tính k-NN để trả về Top 10 sản phẩm phù hợp nhất.
 
-```mermaid
-flowchart TB
-    subgraph offline [Offline Training - Chạy hàng tuần]
-        Images["Ảnh sản phẩm"] -->|FashionCLIP| CLIP["512-dim Embeddings"]
-        Transactions["Giao dịch"] -->|Co-occurrence| Graph["Đồ thị Co-purchase"]
-        CLIP --> Graph
-        Graph -->|SAGEConv + Contrastive Loss| HGNN["HGNN Teacher → 64-dim"]
-        HGNN -->|Knowledge Distillation| StudentMLP["Student MLP"]
-        CLIP --> StudentMLP
-        StudentMLP -->|Project all articles| WeaviateRec["Weaviate: ProductRec"]
-    end
+### 3. Lớp Dữ liệu & Lưu trữ (Data & Storage Layer)
+Nơi lưu trữ tri thức tĩnh (danh mục sản phẩm, embeddings) và trạng thái động (lịch sử user, trọng số model cá nhân).
 
-    subgraph online [Online Serving - Realtime]
-        User([User]) --> API[Modal API]
-        API --> LRU{LRU Cache Hit?}
-        LRU -- Yes --> MLP[Personal MLP in RAM]
-        LRU -- No --> Redis[(Upstash Redis)] --> MLP
-        API --> Weaviate[(Weaviate ProductRec)]
-        Weaviate -- Top-100 Candidates --> MLP
-        MLP -- Re-rank --> Output([Top-10 Personalized Recs])
-        API -- Triplet Loss SGD --> MLP
-        MLP -- Eager Write-back --> Redis
-    end
-```
+#### 3.1. Vector Database (Weaviate Cloud)
+Được cấu hình để phục vụ đồng thời truy vấn Semantic và Candidate Generation.
 
----
+- Collection Product: Phục vụ Hybrid Search.
 
-## 4. Phương pháp đánh giá (theo Paper)
+- Dữ liệu: Vector 512-dim (FashionCLIP) + Metadata (Tên, Giá, Loại, Màu sắc, Link ảnh).
 
-| Thông số | Giá trị |
-|---|---|
-| **Metrics** | Precision@10, Recall@10, F1@10 (× 10⁴) |
-| **Ground truth T** | 12 sản phẩm mua tiếp theo |
-| **Số lần chạy** | 3 random weeks → mean ± std |
-| **Baselines** | Random, Last-K, CNN-EMA (no pretrain, no personalization) |
-| **Ablation configs** | No Personalization, No Pre-training, No Pre-training & No Personalization, Complete |
-| **Personalization windows** | Day-by-day, 1 week, 2 weeks, 3 weeks |
+- Tokenization: Hỗ trợ BM25 (Keyword matching) và Exact Filtering cho metadata.
 
-**Kết quả tham chiếu (Public dataset - Table 3 trong paper):**
+- Collection ProductRec: Phục vụ Recommendation.
 
-| Model | Precision | Recall | F1 |
-|---|---|---|---|
-| Random baseline | 72 | 59 | 62 |
-| Best public solution | 289 | 241 | 262 |
-| **HGNN + 2 weeks personalization** | **312** | **285** | **298** |
+- Dữ liệu: Vector 64-dim (từ Student MLP) + article_id.
 
----
+#### 3.2. State Management (Redis - Local Docker)
+Lưu trữ "bộ não" cá nhân hóa với tốc độ truy xuất In-memory. Để khởi chạy local, sử dụng lệnh `docker-compose up -d redis`.
 
-## 5. Kế hoạch thực hiện (8 tuần — 4 thành viên)
+- rec:state:{session_id}: JSON document lưu trữ thông tin session (EMA vector, lịch sử tương tác, metadata).
+- rec:model:{session_id}: Chuỗi nhị phân (Base64) chứa trọng số (weights) của mạng Personal MLP dành riêng cho từng user.
+- rec:lock:{session_id}: Khóa ngắn hạn chống đụng độ khi chạy adaptation.
 
-### GIAI ĐOẠN 1: POC & Demo Tĩnh (Tuần 1–3)
-*Mục tiêu: Pipeline end-to-end trên subset nhỏ (1 ngày, ~10K items, ~5K users).*
+#### 3.3. Image Hosting (Cloudinary)
+- Vai trò: CDN chuyên dụng để phân phối hình ảnh tĩnh.
 
-- **1.1** Setup repo, environment, data download & exploration
-- **1.2** FashionCLIP embedding extraction (512-dim) + Weaviate schema & ingestion
-- **1.3** Đồ thị Co-purchase + HGNN Teacher training (SAGEConv + Contrastive Loss)
-- **1.4** Student MLP distillation + ingestion 64-dim vectors vào Weaviate `ProductRec`
-- **1.5** Hybrid Search Engine (Text/Image → Weaviate) + Static Recommender
-- **1.6** Streamlit Demo v1: Hybrid search + item-to-item recommendations
-- **1.7** Modal deployment cho POC (GPU training + CPU serving)
+- Cách hoạt động: Metadata lưu trữ đường dẫn secure_url. Trình duyệt (thông qua component <Image> của Next.js) sẽ tải ảnh trực tiếp từ Cloudinary, giúp giảm tải hoàn toàn băng thông cho Backend.
 
-### GIAI ĐOẠN 2: Scale & Cá nhân hóa Real-time (Tuần 4–6)
-*Mục tiêu: Full 105K sản phẩm, Personal MLP + Triplet Loss adaptation.*
+### 4. Luồng Tương tác Dữ liệu (System Data Flow)
+- Trải nghiệm Khám phá (Search): User nhập "áo len đỏ" -> Next.js gọi GET /search -> FastAPI mã hóa text thành vector và gọi Weaviate Hybrid Search -> Trả về danh sách Grid sản phẩm.
 
-- **2.1** Scale data (1-week graph, full 105K articles), retrain HGNN + Student MLP
-- **2.2** Personal MLP + EMA + Upstash Redis persistence + LRU Cache lifecycle
-- **2.3** Triplet Loss adaptation (SGD online) + Redis write-back
-- **2.4** Interaction Simulator (session replay từ test data)
-- **2.5** Streamlit Demo v2: Real-time personalization + before/after comparison
-- **2.6** Modal production deployment (/search, /recommend, /interact)
+- Học hỏi Thời gian thực (Interact): User click vào 1 chiếc áo trong Grid -> Next.js gọi ngầm POST /interact -> FastAPI lấy Personal MLP của user từ Redis, chạy SGD để học sở thích mới, và lưu ngược model lại Redis (thời gian < 50ms).
 
-### GIAI ĐOẠN 3: Evaluation & Báo cáo (Tuần 7–8)
-*Mục tiêu: Đánh giá khoa học theo protocol của paper.*
+- Gợi ý Tức thời (Recommend): Ngay sau khi click, Next.js gọi GET /recommend -> FastAPI lấy Top 100 từ Weaviate, Re-rank qua mô hình vừa được fine-tune, và trả về Top 10 -> Cập nhật hiển thị lên khu vực "Gợi ý cá nhân hóa" (thời gian ~200ms).
 
-- **3.1** Evaluation framework: P@10, R@10, F1@10 trên 3 random weeks
-- **3.2** Ablation study (4 configurations theo Table 4)
-- **3.3** Hyperparameter sensitivity (alpha, SGD steps, margin, TTL, LRU size)
-- **3.4** Latency & memory profiling
-- **3.5** Báo cáo cuối: Delta analysis vs paper, notebook kết quả, README hoàn chỉnh
+## Kế Hoạch Triển Khai Kỹ Thuật
 
----
+### 1. Phase 1: Xử lý Dữ liệu & Thiết lập Lưu trữ (Offline Phase)
 
-## 6. Tech Stack
+Mục tiêu: Cấu hình Vector Database để hỗ trợ đồng thời 2 luồng: Semantic Search (đầu vào từ Text/Filter) và Recommendation (đầu vào từ User Graph).
 
-| Layer | Công nghệ |
-|---|---|
-| ML Framework | PyTorch, PyTorch Geometric |
-| CNN Encoder | FashionCLIP (patrickjohncyh/fashion-clip) |
-| Vector DB | Weaviate Cloud (Hybrid search + KNN) |
-| User State Storage | Upstash Redis (serverless, REST-based) |
-| Serverless Compute | Modal (GPU training + CPU serving) |
-| Frontend | Streamlit |
-| Tracking | Weights & Biases |
-| Language | Python 3.10+ |
+#### 1.1. Cấu hình Weaviate Schema: Thiết lập 2 collection chuyên biệt:
 
----
+- Product (Dùng cho Hybrid Search): * Lưu vector 512-dim từ FashionCLIP.
 
-## 7. Cấu trúc thư mục
+- Định nghĩa cấu trúc Metadata (Properties) rõ ràng: product_name, product_type, color_group, department và cấu hình Tokenization dạng word hoặc field để hỗ trợ thuật toán BM25 (Keyword matching) và Exact Match Filtering.
 
-```
-fashion-recsys/
-  data/               # Raw and processed data
-  src/
-    data/             # Data loading, preprocessing, graph construction
-    models/           # HGNN, StudentMLP, PersonalMLP
-    training/         # Training loops, losses (contrastive, alignment, triplet)
-    search/           # Hybrid search engine (Weaviate client, FashionCLIP encoder)
-    inference/        # Recommender, MLP lifecycle, user state (EMA), Redis client
-    evaluation/       # Metrics, ablation, profiling
-    modal_app/        # Modal serverless deployment
-  app/                # Streamlit frontend
-  configs/            # Hyperparameter YAML configs
-  notebooks/          # Exploration & results notebooks
-  tests/
-  requirements.txt
-  README.md
-```
+- ProductRec (Dùng cho Recommendations): * Lưu vector 64-dim từ Student MLP kèm article_id.
+
+#### 1.2. Batch Import: * Upload ảnh lên Cloudinary lấy secure_url.
+
+- Trích xuất embedding 512-dim (FashionCLIP) và 64-dim (Student MLP).
+
+- Đẩy toàn bộ dữ liệu kèm metadata vào 2 collection trên Weaviate Cloud.
+
+### 2. Phase 2: Phát triển Backend API (FastAPI - Localhost:8000)
+
+Mục tiêu: Mở rộng "Bộ não" để xử lý luồng Search đa phương thức (Multimodal) với tốc độ cao.
+
+#### 2.1. Khởi tạo State & Models trên RAM (@app.on_event("startup")):
+
+- Nạp dictionary vector 64-dim để phục vụ luồng Re-ranking.
+
+- Nạp mô hình FashionCLIP Text Encoder: Đưa model encode text vào VRAM/RAM để biến câu truy vấn của người dùng (ví dụ: "áo len đỏ") thành vector 512-dim với độ trễ < 20ms.
+
+#### 2.2. Xây dựng API GET /search (Tính năng cốt lõi mới):
+
+- Nhận Payload: query (string) và filters (dict metadata).
+
+- Logic xử lý: * Encode query thành vector 512-dim qua mạng FashionCLIP.
+
+- Gọi Weaviate Collection Product bằng hàm query.hybrid() kết hợp:
+
+- Vector similarity (tìm các sản phẩm có ảnh khớp ý nghĩa semantic của text).
+
+- BM25 (tìm các sản phẩm có metadata chứa từ khóa query).
+
+- Where filter (lọc chính xác theo thuộc tính filters).
+
+- Sử dụng tham số alpha (từ 0 đến 1) để cân bằng trọng số giữa Vector và Keyword.
+
+- Tối ưu Payload: Chỉ trả về thông tin hiển thị (ID, Tên, Giá, Ảnh), tuyệt đối lược bỏ trường vector.
+
+#### 2.3. Cập nhật API POST /interact & GET /recommend:
+
+- Giữ nguyên luồng tính toán: Ghi nhận click từ kết quả của API /search -> Lưu state Redis -> Fine-tune Personal MLP qua SGD -> Query ProductRec -> Re-rank bằng không gian cá nhân hóa trả về Top 10.
+
+### 3. Phase 3: Phát triển Frontend (Next.js - Localhost:3000)
+
+Mục tiêu: Khai thác UI để kích hoạt Hybrid Search và điều phối song song luồng Recommendation.
+
+#### 3.1. Nâng cấp Component Tìm kiếm:
+
+- Thêm thanh Search Bar nhập text.
+
+- Thêm cụm Filter UI (Dropdown/Checkbox) tương ứng với các trường metadata trên Weaviate (ví dụ: Chọn nhóm màu, Loại sản phẩm).
+
+#### 3.2. Cập nhật luồng State & Data Fetching:
+
+- Thay vì load trang chủ ngẫu nhiên: Gọi API GET /search với query rỗng để Weaviate trả về list default ban đầu.
+
+- Khi User Submit Search/Filter: Gọi API GET /search với tham số tương ứng -> Render lại Grid kết quả chính.
+
+- Khi User Click vào Item Search: * Gọi ngầm POST /interact.
+
+- Gọi GET /recommend và render danh sách "You might also like" bằng các component UI cập nhật tức thời theo trọng số Personal MLP.
+
+#### 4. Phase 4: Tích hợp & Kiểm thử Hiệu năng (Integration)
+
+- Tối ưu hóa Weaviate Hybrid Cache: Đảm bảo luồng search cơ bản (không cá nhân hóa) phải được Weaviate trả về dưới 100ms.
+
+- Pre-warm AI Models: Gọi giả lập 1 request vào API /search ngay khi start server để load PyTorch graph và FashionCLIP, triệt tiêu độ trễ Cold-start cho lượt tìm kiếm đầu tiên của user lúc Demo.
+
+
+<!-- docker-compose up -d redis
+uvicorn app.main:app --reload --port 8000
+npm run dev -->

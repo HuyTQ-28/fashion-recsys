@@ -263,10 +263,10 @@ class PersonalizationEngine:
             shown_articles: Articles shown alongside (used as negatives).
 
         Returns:
-            Dict with status, interaction_count, adapted flag.
+            Dict with status, interaction_count, needs_adaptation flag.
         """
         if article_id not in self.clip_embeddings:
-            return {"status": "skipped", "interaction_count": 0, "adapted": False}
+            return {"status": "skipped", "interaction_count": 0, "needs_adaptation": False}
 
         entry = self.lifecycle.get_or_create(user_id)
         clip_emb = self.clip_embeddings[article_id]
@@ -283,20 +283,45 @@ class PersonalizationEngine:
         entry.user_state.record_interaction(article_id, interaction_type, clip_emb)
         entry.interaction_batch.append(article_id)
 
-        adapted = False
-        adaptation_time_ms = None
-        if len(entry.interaction_batch) >= self.trigger_every_n:
-            adapted, adaptation_time_ms = self._trigger_adaptation(entry, shown_articles)
-            self.lifecycle.mark_dirty(user_id)
-            self.lifecycle.flush(user_id)
-            entry.interaction_batch = []
+        needs_adaptation = len(entry.interaction_batch) >= self.trigger_every_n
+        
+        self.lifecycle.mark_dirty(user_id)
+        self.lifecycle.flush(user_id)
 
         return {
             "status": "ok",
             "interaction_count": entry.user_state.interaction_count,
-            "adapted": adapted,
-            "adaptation_time_ms": adaptation_time_ms,
+            "needs_adaptation": needs_adaptation,
         }
+
+    def run_async_adaptation(
+        self,
+        user_id: str,
+        shown_articles: Optional[List[str]] = None,
+    ) -> None:
+        """
+        Asynchronously run triplet loss adaptation with locking to prevent duplicates.
+        """
+        if not self.lifecycle.repository.try_acquire_lock(user_id, ttl_seconds=30):
+            logger.info(f"Adaptation for {user_id} already in progress. Skipping.")
+            return
+            
+        try:
+            entry = self.lifecycle.get_or_create(user_id)
+            if not entry.interaction_batch:
+                return
+                
+            adapted, adaptation_time_ms = self._trigger_adaptation(entry, shown_articles)
+            
+            if adapted:
+                entry.interaction_batch = []
+                self.lifecycle.mark_dirty(user_id)
+                self.lifecycle.flush(user_id)
+                logger.info(f"Async adaptation for {user_id} completed in {adaptation_time_ms:.2f}ms")
+        except Exception as e:
+            logger.error(f"Error during async adaptation for {user_id}: {e}")
+        finally:
+            self.lifecycle.repository.release_lock(user_id)
 
     def get_user_state(self, user_id: str) -> dict:
         """

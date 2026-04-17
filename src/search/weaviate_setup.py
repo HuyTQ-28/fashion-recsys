@@ -1,11 +1,3 @@
-"""
-Weaviate Schema Design & Setup.
-
-Two collections:
-- Product: 512-dim FashionCLIP embeddings + article metadata (for hybrid search)
-- ProductRec: 64-dim Student MLP embeddings (for graph-aware KNN recommendations)
-"""
-
 import logging
 from typing import Optional
 
@@ -73,7 +65,7 @@ def create_product_collection(client: weaviate.WeaviateClient, delete_existing: 
             Property(name="index_group_name", data_type=DataType.TEXT, tokenization=Tokenization.FIELD),
             Property(name="garment_group_name", data_type=DataType.TEXT, tokenization=Tokenization.FIELD),
             Property(name="detail_desc", data_type=DataType.TEXT, tokenization=Tokenization.WORD),
-            Property(name="image_path", data_type=DataType.TEXT), 
+            Property(name="image_url", data_type=DataType.TEXT, skip_vectorization=True),
         ],
     )
     logger.info(f"Created collection: {collection_name}")
@@ -105,7 +97,7 @@ def create_product_rec_collection(client: weaviate.WeaviateClient, delete_existi
         ),
         properties=[
             Property(name="article_id", data_type=DataType.TEXT, tokenization=Tokenization.FIELD),
-            Property(name="image_path", data_type=DataType.TEXT),
+            Property(name="image_url", data_type=DataType.TEXT),
         ],
     )
     logger.info(f"Created collection: {collection_name}")

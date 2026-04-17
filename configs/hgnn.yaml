@@ -1,7 +1,3 @@
-# ============================================================
-# HGNN + Student MLP Hyperparameters (Paper Table 5 - left)
-# ============================================================
-
 hgnn:
   # Architecture
   structural_layers: [512, 256, 128, 64]  # alt: [512, 256, 256, 128, 64]
@@ -13,28 +9,31 @@ hgnn:
   relation_agg: "mean"        # {sum, mean}
   weighted_sampling: false     # {true, false}
   num_neighbors: [8, 8, 8]
-  batch_size: 128
+  batch_size: 1024
 
   # Training
-  learning_rate: 1.0e-3       # search: {1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7}
-  weight_decay: 1.0e-5        # search: {1e-5, 1e-6, 1e-7, 0}
-  contrastive_margin: 1       # {1, 100}
+  learning_rate: 1e-5       # search: {1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7}
+  weight_decay: 2e-5        # search: {1e-5, 1e-6, 1e-7, 0}
+  contrastive_margin: 2.0       # {1, 100}
   early_stopping_patience: 5
   max_epochs: 100
 
   # Loss weights per relation type (co-clicked, co-favorite, co-cart, co-purchased)
-  # For H&M (purchase only): gamma = [1.0] (single relation)
-  gamma: [1.0, 0.5, 0.5, 0.1]
+  gamma:
+    click: 1.0
+    favorite: 0.5
+    cart: 0.5
+    purchase: 0.1
 
 student_mlp:
   layers: [512, 256, 128, 64]
   activation: "relu"
-  learning_rate: 1.0e-3
-  weight_decay: 1.0e-5
+  learning_rate: 1.0e-4
+  weight_decay: 2.0e-5
   max_epochs: 100
-  early_stopping_patience: 5
+  early_stopping_patience: 10
 
-# Data
+# Dataoutput_path
 data:
   poc_date: "2020-09-15"
   full_week_start: "2020-09-07"
@@ -46,4 +45,4 @@ data:
 # Wandb
 wandb:
   project: "fashion-recsys"
-  entity: null  # set your wandb entity
+  entity: null

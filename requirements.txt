@@ -10,22 +10,20 @@ Pillow>=10.0.0
 
 # Vector DB & Storage
 weaviate-client>=4.4.0
-upstash-redis>=1.0.0
-
-# Serverless Deployment
-modal>=0.60.0
-
-# Frontend
-streamlit>=1.30.0
+redis>=5.0.0
+cloudinary>=1.36.0
 
 # Data
 pandas>=2.1.0
 numpy>=1.24.0
 pyarrow>=14.0.0
-kaggle>=1.6.0
+# kaggle>=1.6.0  # data download only — not runtime
 
 # Config & Logging
 pyyaml>=6.0.0
+
+# Offline Training & GPU
+modal>=0.60.0
 wandb>=0.16.0
 
 # Evaluation & Visualization

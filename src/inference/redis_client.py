@@ -1,12 +1,3 @@
-"""
-Upstash Redis Backend for MLP Lifecycle Manager.
-
-Owner: Member 3 (Search & Infrastructure)
-
-Implements the StorageBackend protocol defined in mlp_lifecycle.py.
-Uses the upstash-redis Python package (REST-based, no persistent TCP connections).
-"""
-
 import logging
 import os
 from typing import Optional

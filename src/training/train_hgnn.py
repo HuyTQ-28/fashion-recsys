@@ -1,223 +1,276 @@
-"""
-HGNN Teacher Training Loop.
-
-Owner: Member 1 (Data & Graph Learning)
-
-Paper reference: Section 2, Equations 2-3
-- Neighbor sampling: num_neighbors=[8,8,8], batch_size=128
-- Early stopping with patience=5
-- Negative sampling: random pairs, |E-| = |E+|
-- Loss weights gamma per relation type
-
-Usage:
-    python -m src.training.train_hgnn --config configs/hgnn.yaml --graph data/processed/graph_poc.pt
-"""
-
-import logging
-from typing import Dict, List, Optional, Tuple
-
+from src.models.hgnn import HGNN, ContrastiveLoss
 import torch
 import torch.nn as nn
+import os
+import yaml
+import argparse
 import torch.optim as optim
+from tqdm import tqdm
 from torch_geometric.data import HeteroData
 from torch_geometric.loader import NeighborLoader
-
-from src.models.hgnn import HGNN, ContrastiveLoss
+from torch_geometric.utils import negative_sampling
+from typing import Tuple
+import logging
 
 logger = logging.getLogger(__name__)
 
-
-def sample_negative_edges(
-    num_nodes: int,
-    num_negatives: int,
-    positive_edge_set: set,
-    device: torch.device,
-) -> torch.Tensor:
-    """
-    Sample random negative edges (pairs not in the graph).
-
-    Args:
-        num_nodes: Total number of nodes.
-        num_negatives: Number of negative edges to sample (= |E+|).
-        positive_edge_set: Set of (src, dst) tuples for positive edges.
-        device: Target device.
-
-    Returns:
-        Negative edge index [2, num_negatives].
-    """
-    neg_edges = []
-    while len(neg_edges) < num_negatives:
-        src = torch.randint(0, num_nodes, (num_negatives * 2,))
-        dst = torch.randint(0, num_nodes, (num_negatives * 2,))
-
-        for s, d in zip(src.tolist(), dst.tolist()):
-            if s != d and (s, d) not in positive_edge_set:
-                neg_edges.append([s, d])
-                if len(neg_edges) >= num_negatives:
-                    break
-
-    return torch.tensor(neg_edges[:num_negatives], dtype=torch.long, device=device).t()
-
+BASE_RELATIONS = ["click", "favorite", "cart", "purchase"]
 
 def train_hgnn(
-    graph: HeteroData,
-    config: dict,
-    device: str = "cuda",
-    use_wandb: bool = False,
-) -> Tuple[HGNN, Dict[str, torch.Tensor]]:
+    graph: HeteroData, config: dict, device: str = "cuda", use_wandb: bool = False
+) -> Tuple[nn.Module, torch.Tensor]:
     """
-    Train the HGNN teacher model.
-
-    Args:
-        graph: PyG HeteroData with node features and edge indices.
-        config: Training configuration from configs/hgnn.yaml.
-        device: Device to train on.
-        use_wandb: Whether to log to Weights & Biases.
-
-    Returns:
-        Tuple of (trained HGNN model, embeddings dict {article_id: Tensor[64]}).
+    Trains the HGNN teacher model using Dynamic In-batch Negative Sampling.
     """
-    hgnn_config = config["hgnn"]
+    layer_dims = config.get("layer_dims", [512, 256, 128, 64])
+    epochs = config.get("max_epochs", 100)
+    lr = config.get("learning_rate", 1e-4)
+    weight_decay = config.get("weight_decay", 2e-5)
+    batch_size = 2048
+    num_neighbors = config.get("num_neighbors", [8, 8, 8])
+    patience = config.get("patience", 5)
 
-    # Detect relation types from graph
-    relation_types = []
-    for edge_type in graph.edge_types:
-        rel_name = edge_type[1]  # (src, rel, dst)
-        relation_types.append(rel_name)
-
-    if not relation_types:
-        raise ValueError("Graph has no edges!")
-
-    logger.info(f"Relation types: {relation_types}")
-
-    # Initialize model
     model = HGNN(
-        layer_dims=hgnn_config["structural_layers"],
-        relation_types=relation_types,
-        relation_aggr=hgnn_config.get("relation_agg", "mean"),
-        activation=hgnn_config.get("activation", "relu"),
+        layer_dims=layer_dims,
+        relation_types=BASE_RELATIONS,
+        neighbor_aggr="mean",
+        relation_aggr="mean",
     ).to(device)
 
-    # Loss
-    gamma = hgnn_config.get("gamma", [1.0])
-    margin = hgnn_config.get("contrastive_margin", 1.0)
-    criterion = ContrastiveLoss(gamma=gamma, margin=margin)
+    margin = config.get("margin", 2.0)
+    
+    # Initialize ContrastiveLoss WITH the margin to prevent unbounded negative loss
+    criterion = ContrastiveLoss(margin=margin).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
-    # Optimizer
-    optimizer = optim.Adam(
-        model.parameters(),
-        lr=hgnn_config["learning_rate"],
-        weight_decay=hgnn_config.get("weight_decay", 0),
+    # ==========================================
+    # 1. SETUP NODE-BASED LOADERS
+    # (Loaders now sample subgraphs without forcing edge labels)
+    # ==========================================
+    num_workers = 4
+    logger.info("Initializing Subgraph Loaders...")
+    train_loader = NeighborLoader(
+        graph,
+        num_neighbors=num_neighbors,
+        batch_size=batch_size,
+        input_nodes='item',
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
     )
 
-    # Training loop
-    max_epochs = hgnn_config.get("max_epochs", 100)
-    patience = hgnn_config.get("early_stopping_patience", 5)
-    best_loss = float("inf")
-    patience_counter = 0
+    val_loader = NeighborLoader(
+        graph,
+        num_neighbors=num_neighbors,
+        batch_size=batch_size,
+        input_nodes='item',
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+    )
 
     if use_wandb:
         import wandb
 
-    node_features = graph["article"].x.to(device)
-    num_nodes = node_features.size(0)
+    # ==========================================
+    # 2. TRAINING & VALIDATION LOOP
+    # ==========================================
+    logger.info("Starting HGNN pre-training with In-batch Negative Sampling...")
+    best_val_loss = float('inf')
+    patience_counter = 0
+    best_model_state = None
 
-    for epoch in range(max_epochs):
+    for epoch in tqdm(range(epochs)):
+        # --- TRAIN PHASE ---
         model.train()
-        optimizer.zero_grad()
+        total_train_loss = 0.0
+        
+        for batch in train_loader:
+            batch = batch.to(device)
+            optimizer.zero_grad()
 
-        # Prepare edge data
-        edge_indices = {}
-        positive_edges = {}
-        positive_weights = {}
-        negative_edges = {}
+            edge_index_dict = {}
+            positive_edges, positive_weights, negative_edges = {}, {}, {}
+            num_nodes_in_batch = batch['item'].num_nodes
 
-        for edge_type in graph.edge_types:
-            rel_name = edge_type[1]
-            edge_index = graph[edge_type].edge_index.to(device)
-            edge_weight = graph[edge_type].edge_weight.to(device)
+            for rel in BASE_RELATIONS:
+                edge_type = ('item', f'co_{rel}', 'item')
+                
+                # Check nếu đồ thị con này có chứa tương tác của relation này
+                if edge_type in batch.edge_types and batch[edge_type].edge_index.size(1) > 0:
+                    pos_edge = batch[edge_type].edge_index
+                    raw_weights = batch[edge_type].edge_weight
 
-            edge_indices[rel_name] = edge_index
-            positive_edges[rel_name] = edge_index
-            positive_weights[rel_name] = edge_weight
+                    # 1. Đưa cạnh vào Message Passing
+                    edge_index_dict[rel] = pos_edge
+                    
+                    # 2. Đưa cạnh vào Positive Loss (Kèm Log-scale chống Gradient Explosion)
+                    positive_edges[rel] = pos_edge
+                    positive_weights[rel] = torch.log1p(raw_weights.to(torch.float32))
 
-            # Build positive edge set for negative sampling
-            pos_set = set(zip(edge_index[0].tolist(), edge_index[1].tolist()))
-            neg_edge = sample_negative_edges(num_nodes, edge_index.size(1), pos_set, device)
-            negative_edges[rel_name] = neg_edge
+                    # 3. DYNAMIC NEGATIVE SAMPLING: Tự sinh cạnh âm bản trên GPU
+                    neg_edge = negative_sampling(
+                        edge_index=pos_edge,
+                        num_nodes=num_nodes_in_batch,
+                        num_neg_samples=pos_edge.size(1), # Tỷ lệ 1:1 theo paper
+                        method='sparse'
+                    )
+                    negative_edges[rel] = neg_edge
 
-        # Forward pass
-        embeddings = model(node_features, edge_indices)
+            # Nếu sub-graph quá thưa, không có cạnh nào thì bỏ qua batch
+            if not positive_edges:
+                continue
 
-        # Loss
-        loss = criterion(embeddings, positive_edges, positive_weights, negative_edges)
-        loss.backward()
-        optimizer.step()
+            embeddings = model(batch['item'].x, edge_index_dict)
+            loss = criterion(embeddings, positive_edges, positive_weights, negative_edges)
+            
+            loss.backward()
+            optimizer.step()
+            total_train_loss += loss.item()
 
-        # Logging
-        if epoch % 5 == 0:
-            logger.info(f"Epoch {epoch}: loss={loss.item():.4f}")
+        avg_train_loss = total_train_loss / len(train_loader)
 
+        # --- VALIDATION PHASE ---
+        model.eval()
+        total_val_loss = 0.0
+        total_global_nodes = graph['item'].num_nodes # Define global scope
+        
+        with torch.no_grad():
+            for batch in val_loader:
+                batch = batch.to(device)
+                
+                val_edge_index_dict = {}
+                val_pos_edges, val_pos_weights, val_neg_edges = {}, {}, {}
+                num_nodes_in_batch = batch['item'].num_nodes
+
+                # 1. Create a lightning-fast Global-to-Local mapping tensor on the GPU
+                global_to_local = torch.full((total_global_nodes,), -1, dtype=torch.long, device=device)
+                global_to_local[batch['item'].n_id] = torch.arange(num_nodes_in_batch, device=device)
+
+                for rel in BASE_RELATIONS:
+                    edge_type = ('item', f'co_{rel}', 'item')
+                    
+                    if edge_type in batch.edge_types:
+                        # Message Passing using training history (Already localized by PyG)
+                        if hasattr(batch[edge_type], 'edge_index') and batch[edge_type].edge_index.size(1) > 0:
+                            val_edge_index_dict[rel] = batch[edge_type].edge_index
+                        
+                        # Calculating Loss using future validation edges
+                        if hasattr(batch[edge_type], 'val_edge_index') and batch[edge_type].val_edge_index.size(1) > 0:
+                            # 2. Translate Global IDs to Local Subgraph IDs
+                            v_pos_edge_global = batch[edge_type].val_edge_index
+                            v_pos_edge_local = global_to_local[v_pos_edge_global]
+                            
+                            # 3. Filter out edges where either the source or destination node is NOT in the current batch
+                            valid_mask = (v_pos_edge_local[0] >= 0) & (v_pos_edge_local[1] >= 0)
+                            
+                            v_pos_edge = v_pos_edge_local[:, valid_mask]
+                            v_raw_weights = batch[edge_type].val_edge_weight[valid_mask]
+
+                            # Only proceed if there are actual validation edges in this localized subgraph
+                            if v_pos_edge.size(1) > 0:
+                                val_pos_edges[rel] = v_pos_edge
+                                val_pos_weights[rel] = torch.log1p(v_raw_weights.to(torch.float32))
+
+                                val_neg_edges[rel] = negative_sampling(
+                                    edge_index=v_pos_edge,
+                                    num_nodes=num_nodes_in_batch,
+                                    num_neg_samples=v_pos_edge.size(1),
+                                    method='sparse'
+                                )
+
+                # Skip the loss calculation if this specific batch subgraph has no validation edges
+                if not val_pos_edges:
+                    continue
+
+                val_embeddings = model(batch['item'].x, val_edge_index_dict)
+                v_loss = criterion(val_embeddings, val_pos_edges, val_pos_weights, val_neg_edges)
+                total_val_loss += v_loss.item()
+
+        avg_val_loss = total_val_loss / max(1, len(val_loader))
+        
+        logger.info(f"Epoch {epoch + 1:03d}/{epochs} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+        
         if use_wandb:
-            wandb.log({"hgnn/train_loss": loss.item(), "epoch": epoch})
+            wandb.log({"train_loss": avg_train_loss, "val_loss": avg_val_loss, "epoch": epoch + 1})
 
-        # Early stopping
-        if loss.item() < best_loss:
-            best_loss = loss.item()
+        # --- EARLY STOPPING ---
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
             patience_counter = 0
-            best_state = model.state_dict()
+            best_model_state = {k: v.cpu() for k, v in model.state_dict().items()}
         else:
             patience_counter += 1
             if patience_counter >= patience:
-                logger.info(f"Early stopping at epoch {epoch}")
+                logger.info(f"Early stopping triggered! Best Val Loss: {best_val_loss:.4f}")
                 break
 
-    # Load best model
-    model.load_state_dict(best_state)
+    # ==========================================
+    # 3. GENERATE FINAL EMBEDDINGS
+    # ==========================================
+    logger.info("Computing final graph embeddings from best model state...")
+    if best_model_state:
+        model.load_state_dict(best_model_state)
     model.eval()
+    
+    final_embeddings = torch.zeros((graph['item'].num_nodes, layer_dims[-1]), device='cpu')
+    
+    inf_loader = NeighborLoader(
+        graph,
+        num_neighbors=num_neighbors, 
+        batch_size=1024,
+        input_nodes='item'
+    )
 
-    # Extract final embeddings
     with torch.no_grad():
-        edge_indices = {}
-        for edge_type in graph.edge_types:
-            rel_name = edge_type[1]
-            edge_indices[rel_name] = graph[edge_type].edge_index.to(device)
+        for batch in inf_loader:
+            batch = batch.to(device)
+            
+            edge_index_dict = {}
+            for rel in BASE_RELATIONS:
+                edge_type = ('item', f'co_{rel}', 'item')
+                if edge_type in batch.edge_types:
+                    edge_index_dict[rel] = batch[edge_type].edge_index
 
-        final_embeddings = model(node_features, edge_indices).cpu()
+            emb = model(batch['item'].x, edge_index_dict)
+            
+            batch_size_inf = batch['item'].batch_size
+            global_nodes = batch['item'].n_id[:batch_size_inf]
+            final_embeddings[global_nodes] = emb[:batch_size_inf].cpu()
 
-    # Create article_id -> embedding mapping
-    embeddings_dict = {}
-    article_ids = graph["article"].article_ids
-    for idx, aid in enumerate(article_ids):
-        embeddings_dict[aid] = final_embeddings[idx]
-
-    logger.info(f"Training complete. Final loss: {best_loss:.4f}")
-    return model, embeddings_dict
+    return model, final_embeddings
 
 
 if __name__ == "__main__":
-    import argparse
-    import yaml
-
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
     parser = argparse.ArgumentParser(description="Train HGNN teacher model")
     parser.add_argument("--config", default="configs/hgnn.yaml")
     parser.add_argument("--graph", required=True, help="Path to graph .pt file")
     parser.add_argument("--output_model", default="checkpoints/hgnn.pt")
     parser.add_argument("--output_embeddings", default="data/processed/hgnn_embeddings.pt")
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--wandb", action="store_true")
     args = parser.parse_args()
 
     with open(args.config) as f:
         config = yaml.safe_load(f)
 
+    logger.info(f"Loading graph from {args.graph}...")
     graph = torch.load(args.graph, weights_only=False)
+
     model, embeddings = train_hgnn(graph, config, device=args.device, use_wandb=args.wandb)
 
-    import os
     os.makedirs(os.path.dirname(args.output_model), exist_ok=True)
+    os.makedirs(os.path.dirname(args.output_embeddings), exist_ok=True)
+
+    output_data = {
+        "embeddings": embeddings.cpu(),
+        "id2idx": graph['item'].id2idx
+    }
+
     torch.save(model.state_dict(), args.output_model)
-    torch.save(embeddings, args.output_embeddings)
-    logger.info(f"Model saved to {args.output_model}, embeddings to {args.output_embeddings}")
+    torch.save(output_data, args.output_embeddings)
+
+    logger.info(f"Model saved to {args.output_model}")
+    logger.info(f"Final embeddings saved to {args.output_embeddings}")

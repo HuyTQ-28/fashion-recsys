@@ -1,16 +1,3 @@
-"""
-Triplet Loss Continual Personalization.
-
-Owner: Member 2 (Personalization Engine)
-
-Paper reference: Section 2, Equations 6-7
-- Collects batch of recent user interactions
-- Computes weighted centroid of interacted article embeddings
-- Selects negatives (random for H&M since no click data)
-- Runs SGD steps on the user's Personal MLP with triplet loss:
-  L_tri = max(0, ||MLP_u(h_wc) - MLP_u(h_pos)||^2 - ||MLP_u(h_wc) - MLP_u(h_neg)||^2 + epsilon)
-"""
-
 import logging
 import time
 from typing import Dict, List, Optional, Tuple
@@ -23,33 +10,15 @@ from src.models.personal_mlp import PersonalMLP
 
 logger = logging.getLogger(__name__)
 
-
-# ============================================================
-# Standalone functions (used by tests and SessionSimulator)
-# ============================================================
-
 def compute_weighted_centroid(interactions: List[Dict]) -> torch.Tensor:
-    """
-    Compute weighted centroid of interaction CLIP embeddings (Eq. 6).
-
-    Args:
-        interactions: List of dicts with keys:
-            - "clip_embedding": torch.Tensor [512]
-            - "weight": float (e.g. purchase=4, click=1)
-
-    Returns:
-        Weighted centroid tensor [512].
-    """
+    """Compute weighted centroid of interaction CLIP embeddings"""
     embeddings = torch.stack([item["clip_embedding"] for item in interactions])  # [B, 512]
     weights = torch.tensor(
         [item.get("weight", 1.0) for item in interactions], dtype=torch.float
     ).unsqueeze(1)  # [B, 1]
 
-    total_weight = weights.sum()
-    if total_weight == 0:
-        return embeddings.mean(dim=0)
-
-    return (embeddings * weights).sum(dim=0) / total_weight
+    B = len(interactions)   # |B_u| — the count, per paper Eq. 6
+    return (embeddings * weights).sum(dim=0) / B
 
 
 def triplet_loss(
@@ -58,20 +27,8 @@ def triplet_loss(
     negative: torch.Tensor,
     margin: float = 1.0,
 ) -> torch.Tensor:
-    """
-    Triplet loss for a single (anchor, positive, negative) triple.
+    """Triplet loss for a single (anchor, positive, negative) triple"""
 
-    L = max(0, ||anchor - positive||^2 - ||anchor - negative||^2 + margin)
-
-    Args:
-        anchor: Anchor embedding [D].
-        positive: Positive embedding [D].
-        negative: Negative embedding [D].
-        margin: Loss margin epsilon.
-
-    Returns:
-        Scalar loss tensor.
-    """
     dist_pos = ((anchor - positive) ** 2).sum()
     dist_neg = ((anchor - negative) ** 2).sum()
     loss = torch.clamp(dist_pos - dist_neg + margin, min=0.0)
@@ -88,24 +45,8 @@ def adapt_personal_mlp(
     weight_decay: float = 1e-6,
     margin: float = float("inf"),
 ) -> Tuple[float, float]:
-    """
-    Run triplet loss adaptation on a Personal MLP in-place.
+    """Run triplet loss adaptation on a Personal MLP in-place"""
 
-    Convenience wrapper around TripletAdaptation.adapt().
-
-    Args:
-        personal_mlp: User's Personal MLP (modified in-place).
-        positive_clip_embeddings: CLIP embeddings of interacted articles.
-        negative_clip_embeddings: CLIP embeddings of negative articles.
-        interaction_weights: Optional per-positive weights.
-        sgd_steps: Number of SGD steps.
-        learning_rate: SGD learning rate.
-        weight_decay: Weight decay.
-        margin: Triplet loss margin.
-
-    Returns:
-        Tuple of (final_loss, adaptation_time_ms).
-    """
     adapter = TripletAdaptation(
         sgd_steps=sgd_steps,
         learning_rate=learning_rate,
@@ -119,11 +60,6 @@ def adapt_personal_mlp(
         interaction_weights,
     )
 
-
-# ============================================================
-# TripletAdaptation class
-# ============================================================
-
 class TripletAdaptation:
     """
     Triplet Loss adaptation for Personal MLP.
@@ -133,10 +69,10 @@ class TripletAdaptation:
 
     def __init__(
         self,
-        sgd_steps: int = 1,           # best from sensitivity sweep
+        sgd_steps: int = 1,
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-6,
-        margin: float = float("inf"),  # best from sensitivity sweep (minimize dist_pos only)
+        margin: float = float("inf"),
     ):
         """
         Args:
@@ -161,15 +97,16 @@ class TripletAdaptation:
 
         Args:
             clip_embeddings: List of CLIP embeddings for interacted articles.
-            weights: Optional weights (e.g., by interaction type or recency).
+            weights: Optional weights (e.g., by interaction type).
 
         Returns:
             Weighted centroid tensor [512].
         """
-        stacked = torch.stack(clip_embeddings)  # [B, 512]
+        stacked = torch.stack(clip_embeddings)  # [B, D]
+        B = stacked.shape[0]  # |B_u|
         if weights is not None:
-            w = torch.tensor(weights, dtype=torch.float).unsqueeze(1)  # [B, 1]
-            return (stacked * w).sum(dim=0) / w.sum()
+            w = torch.tensor(weights, dtype=torch.float, device=stacked.device).unsqueeze(1)  # [B, 1]
+            return (stacked * w).sum(dim=0) / B
         return stacked.mean(dim=0)
 
     def adapt(
@@ -180,7 +117,7 @@ class TripletAdaptation:
         interaction_weights: Optional[List[float]] = None,
     ) -> Tuple[float, float]:
         """
-        Run triplet loss adaptation on a Personal MLP (Equation 7).
+        Run triplet loss adaptation on a Personal MLP.
 
         Modifies the MLP weights IN-PLACE.
 
@@ -205,7 +142,7 @@ class TripletAdaptation:
         h_pos = torch.stack(positive_embeddings)  # [B_pos, 512]
         h_neg = torch.stack(negative_embeddings)  # [B_neg, 512]
 
-        # SGD optimizer (fresh for each adaptation)
+        # SGD optimizer
         optimizer = optim.SGD(
             personal_mlp.parameters(),
             lr=self.learning_rate,
@@ -222,16 +159,21 @@ class TripletAdaptation:
             proj_pos = personal_mlp(h_pos)   # [B_pos, 64]
             proj_neg = personal_mlp(h_neg)   # [B_neg, 64]
 
-            # Triplet loss (Eq. 7)
-            dist_pos = ((proj_wc - proj_pos) ** 2).sum(dim=-1)  # [B_pos]
-            dist_neg = ((proj_wc - proj_neg) ** 2).sum(dim=-1)  # [B_neg]
+            # Paper Eq. 7 — pairwise triplet loss, summed over all (pos, neg) pairs.
+            # Pair each positive with ONE negative (min-length pairing).
+            n_pairs = min(proj_pos.shape[0], proj_neg.shape[0])
+            proj_pos_paired = proj_pos[:n_pairs]   # [P, 64]
+            proj_neg_paired = proj_neg[:n_pairs]   # [P, 64]
 
-            loss_raw = dist_pos.mean() - dist_neg.mean()
+            dist_pos = ((proj_wc - proj_pos_paired) ** 2).sum(dim=-1)  # [P]
+            dist_neg = ((proj_wc - proj_neg_paired) ** 2).sum(dim=-1)  # [P]
 
             if self.margin == float("inf"):
-                loss = dist_pos.mean()
+                # Degenerate margin=∞ case: only push positives closer to centroid
+                loss = dist_pos.sum()
             else:
-                loss = torch.clamp(loss_raw + self.margin, min=0)
+                # Standard triplet: max(0, d_pos - d_neg + ε), summed over pairs
+                loss = torch.clamp(dist_pos - dist_neg + self.margin, min=0.0).sum()
 
             if loss.item() > 0:
                 loss.backward()

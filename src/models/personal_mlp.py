@@ -1,15 +1,3 @@
-"""
-Personal MLP — Per-User Meta-Model.
-
-Owner: Member 2 (Personalization Engine)
-
-Paper reference: Section 2
-- Architecture identical to Student MLP: [512, 256, 128, 64]
-- Initialized as a deep copy of the trained Student MLP
-- Continually adapted per user via Triplet Loss (Eq. 6-7)
-- Serialized to ~700KB for Redis storage
-"""
-
 import copy
 import io
 import base64
@@ -25,18 +13,14 @@ logger = logging.getLogger(__name__)
 class PersonalMLP(nn.Module):
     """
     Personal MLP — per-user copy of the Student MLP.
-
-    Each user gets their own instance, initialized from the global Student MLP.
-    The personal MLP projects products into a user-specific space that is
-    continually adapted based on interactions.
     """
 
-    def __init__(self, base_model=None, user_id: str = "", layer_dims: List[int] = None, base_mlp=None):
+    def __init__(self, base_model=None, user_id: str = "", layer_dims: List[int] = None):
         """
         Initialize Personal MLP.
 
         Args:
-            base_model: Trained Student MLP (or PersonalMLP) to deep-copy from.
+            base_model: Trained StudentMLP (or PersonalMLP) to deep-copy from.
                         If None, creates a new MLP with layer_dims (for deserialization).
             user_id: User identifier.
             layer_dims: Layer dimensions (used only if base_model is None).
@@ -46,26 +30,9 @@ class PersonalMLP(nn.Module):
         self.user_id = user_id
         self.interaction_count = 0
 
-        # Support both kwarg names
-        base_model = base_model or base_mlp
-
         if base_model is not None:
-            # Deep copy weights from base model.
-            # Normalize: StudentMLP (real) uses .network, mock uses .net.
-            # We always store as self.network so state_dict keys are consistent.
-            if hasattr(base_model, "network"):
-                src = base_model.network
-                self.layer_dims = getattr(base_model, "layer_dims", [512, 256, 128, 64])
-            elif hasattr(base_model, "net"):
-                src = base_model.net
-                self.layer_dims = layer_dims or [512, 256, 128, 64]
-            elif isinstance(base_model, nn.Sequential):
-                src = base_model
-                self.layer_dims = layer_dims or [512, 256, 128, 64]
-            else:
-                # PersonalMLP copying another PersonalMLP
-                src = base_model.network
-                self.layer_dims = getattr(base_model, "layer_dims", [512, 256, 128, 64])
+            src = base_model.network
+            self.layer_dims = getattr(base_model, "layer_dims", [512, 256, 128, 64])
             self.network = copy.deepcopy(src)
             self.input_dim = self.layer_dims[0]
             self.output_dim = self.layer_dims[-1]
@@ -93,10 +60,6 @@ class PersonalMLP(nn.Module):
             User-specific projected embeddings [batch_size, 64].
         """
         return self.network(x)
-
-    # ------------------------------------------------------------------ #
-    # Serialization (instance methods — used by tests and lifecycle mgr)  #
-    # ------------------------------------------------------------------ #
 
     def serialize(self) -> str:
         """
@@ -145,10 +108,6 @@ class PersonalMLP(nn.Module):
         return len(self.serialize()) / 1024
 
 
-# ============================================================
-# Factory — loads Student MLP checkpoint and creates copies
-# ============================================================
-
 class PersonalMLPFactory:
     """
     Creates PersonalMLP instances by deep-copying a loaded Student MLP.
@@ -158,15 +117,19 @@ class PersonalMLPFactory:
         mlp = factory.create("user_001")
     """
 
-    def __init__(self, checkpoint_path: str, layer_dims: List[int] = None):
+    def __init__(self, checkpoint_path: Optional[str] = None, layer_dims: List[int] = None):
         """
         Args:
             checkpoint_path: Path to Student MLP state_dict (.pt file).
             layer_dims: Architecture dimensions (default [512, 256, 128, 64]).
         """
+        import os
         self.checkpoint_path = checkpoint_path
         self.layer_dims = layer_dims or [512, 256, 128, 64]
-        self._base_mlp = self._load(checkpoint_path)
+        if checkpoint_path and os.path.exists(checkpoint_path):
+            self._base_mlp = self._load(checkpoint_path)
+        else:
+            self._base_mlp = PersonalMLP(base_model=None, layer_dims=self.layer_dims)
 
     def _load(self, path: str) -> PersonalMLP:
         """Load Student MLP from checkpoint."""
@@ -201,17 +164,3 @@ class PersonalMLPFactory:
         return mlp
 
 
-# ============================================================
-# Legacy standalone helpers (kept for backward compat)
-# ============================================================
-
-def serialize_mlp(mlp: PersonalMLP) -> str:
-    return mlp.serialize()
-
-
-def deserialize_mlp(encoded: str, layer_dims=None) -> PersonalMLP:
-    return PersonalMLP.deserialize(encoded)
-
-
-def get_serialized_size_kb(mlp: PersonalMLP) -> float:
-    return mlp.get_size_kb()
