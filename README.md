@@ -147,7 +147,16 @@ Mục tiêu: Khai thác UI để kích hoạt Hybrid Search và điều phối s
 
 - Pre-warm AI Models: Gọi giả lập 1 request vào API /search ngay khi start server để load PyTorch graph và FashionCLIP, triệt tiêu độ trễ Cold-start cho lượt tìm kiếm đầu tiên của user lúc Demo.
 
+## Hướng dẫn sử dụng
+```bash
+# Khởi động Redis
+docker-compose up -d redis
 
-<!-- docker-compose up -d redis
+# Khởi động FastAPI
 uvicorn app.main:app --reload --port 8000
-npm run dev -->
+
+# Khởi động Next.js
+# Mở 1 terminal mới
+cd frontend
+npm run dev
+```
