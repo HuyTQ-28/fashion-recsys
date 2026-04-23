@@ -11,6 +11,7 @@ Paper reference: Section 3
 """
 
 import logging
+import math
 from typing import List, Dict, Tuple
 
 import numpy as np
@@ -80,6 +81,35 @@ def f1_at_k(recommended: List[str], ground_truth: List[str], k: int = 10) -> flo
     if p + r == 0:
         return 0.0
     return 2 * p * r / (p + r)
+
+
+def hit_rate_at_k(recommended: List[str], ground_truth: List[str], k: int = 10) -> float:
+    """HR@K: 1 if at least one recommended item is in ground truth, else 0."""
+    if not ground_truth:
+        return 0.0
+    return float(bool(set(recommended[:k]) & set(ground_truth)))
+
+
+def ndcg_at_k(recommended: List[str], ground_truth: List[str], k: int = 10) -> float:
+    """
+    NDCG@K: normalized discounted cumulative gain.
+
+    Items ranked higher get more credit. Normalized by ideal DCG.
+    Binary relevance: 1 if item in ground_truth, else 0.
+    """
+    if not ground_truth:
+        return 0.0
+
+    gt_set = set(ground_truth)
+    dcg = sum(
+        1.0 / math.log2(rank + 2)
+        for rank, item in enumerate(recommended[:k])
+        if item in gt_set
+    )
+    # Ideal DCG: all relevant items ranked first
+    n_relevant = min(len(gt_set), k)
+    idcg = sum(1.0 / math.log2(rank + 2) for rank in range(n_relevant))
+    return dcg / idcg if idcg > 0 else 0.0
 
 
 def evaluate_user_session(

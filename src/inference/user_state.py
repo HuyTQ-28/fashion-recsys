@@ -8,6 +8,8 @@ logger = logging.getLogger(__name__)
 # Interaction type -> weight mapping (H&M: purchase >> click)
 INTERACTION_WEIGHTS: Dict[str, int] = {
     "purchase": 4,
+    "cart": 3,
+    "favorite": 2,
     "click": 1,
     "view": 1,
 }
