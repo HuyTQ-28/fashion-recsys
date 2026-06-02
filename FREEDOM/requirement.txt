@@ -1,0 +1,10 @@
+modal
+torch
+torchvision
+numpy
+pandas
+scipy
+PyYAML
+lmdb
+matplotlib
+Pillow

@@ -1,0 +1,69 @@
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment variables
+.env
+
+# Logs
+*.log
+
+# VS Code
+.vscode/
+
+# PyCharm
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Model files (nếu lớn)
+*.pth
+*.pt
+*.ckpt
+
+# Data files (nếu không muốn push)
+data/
+/dataset/
+/datasets/
+
+# Modal
+.modal/
+
+# Build
+dist/
+build/
+
+# Large recommender-system data and trained artifacts
+hm/
+saved/
+/saved
+trained_models/
+checkpoints/
+runs/
+recommend_topk/
+log/
+*.inter
+*.npy
+*.npz
+*.csv
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
+*_adj_*.pt
+s_adj_mat.npz
+s_norm_adj_mat.npz
+s_mean_adj_mat.npz

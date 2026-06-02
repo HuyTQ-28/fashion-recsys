@@ -1,0 +1,27 @@
+# Common Features
+USER_ID_FIELD: userID:token
+ITEM_ID_FIELD: itemID:token
+TIME_FIELD: timestamp:float
+inter_splitting_label: x_label:float
+
+filter_out_cod_start_users: True
+
+# H&M files are stored directly in FREEDOM/hm.
+data_path: '..'
+
+inter_file_name: 'hm.inter'
+
+# name of features
+vision_feature_file: 'image_feat.npy'
+text_feature_file: 'text_feat.npy'
+user_graph_dict_file: 'user_graph_dict.npy'
+
+# Dataset metadata
+expected_num_users: 147157
+expected_num_items: 20385
+expected_num_interactions: 1447391
+expected_split_counts: [1128847, 166084, 152460]
+expected_vision_feature_shape: [20385, 768]
+expected_text_feature_shape: [20385, 384]
+
+field_separator: "\t"
